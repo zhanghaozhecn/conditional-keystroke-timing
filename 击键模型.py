@@ -45,8 +45,9 @@ def _precompute_phi():
     [同手, 同指, 同键, 列距, 行距, Fitts, 镜像手指, 跨行同指]
     文献依据: İşeri & Ekşioğlu 2015 (列>行>手 重要性排序, 显式几何有独立信息);
     Fitts (MT = a + b·log2(1+D/W), W=键宽, 行距≈2 键宽); keygen (同指跨行最慢);
-    Grudin 1983 (镜像手指换位). 原 φ2 对照: 5 seed 验证段MAE 38.4→37.4,
-    best-of-10 37.2→36.2 (总 MAE 持平 62.2, R² 0.433→0.435), 方向一致采纳"""
+    Grudin 1983 (镜像手指换位). 消融 (实验-特征消融.py, 2026-08-11):
+    逐特征 LOO 全部持平 (Δ<0.2ms, seed 方差 ±1ms) — 显式特征在嵌入模型上
+    无独立贡献, 增益在噪声内; 保留 φ8 因文献可解释性 (特征权重可诊断), 非性能"""
     feats = {}
     for a in LETTERS:
         ca,ra = LETTER_TO_COL[a], LETTER_TO_ROW[a]
@@ -84,8 +85,9 @@ class KeystrokeModel(nn.Module):
     无稳定收益 → 默认 de20/dh64。
     激活/归一化 (实验-激活函数.py, 5 seed): relu 最优 (leaky/sigmoid/relu²/silu/swiglu
     全灭); 隐藏层后 RMSNorm 微增益 59.4/0.401 vs 61.7/0.395 (噪声边缘, 不恶化) → 落地。
-    特征扩展 (实验-特征扩展.py, 2026-08-11): φ 2→8 维 (文献几何/手指特征),
-    5 seed 验证段MAE 38.4→37.4, best-of-10 37.2→36.2 (总 MAE 持平 62.2, R² 0.433→0.435)。"""
+    特征扩展 (实验-特征扩展.py/实验-特征消融.py, 2026-08-11): φ 2→8 维
+    (文献几何/手指特征), 粗对比 38.4→37.4 似有增益, 但逐特征 LOO 全部持平
+    (Δ<0.2ms) — 增益在噪声内, 保留 φ8 因文献可解释性而非性能。"""
     def __init__(self, d_embed=20, d_hidden=64):
         super().__init__()
         self.E_key = nn.Embedding(len(LETTERS) + 1, d_embed)  # 30 键 + 空前键
