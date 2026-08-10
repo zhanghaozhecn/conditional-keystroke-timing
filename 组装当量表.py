@@ -13,7 +13,7 @@
 --expected: 同时输出期望当量表 (当量-期望-2-4键.txt)
   期望段当量 = 条件段当量 + 500ms × P_err(a,b)   (错误损失固定 500ms:
   退格+注意力+重输, 与键对难度解耦; 500 与 分析-错误当量.py 推导 455ms 吻合)
-  P_err 读自 当量-键对正确率.txt (分析-错误率规律.py 简单特征模型, 跨手修正)
+  P_err 读自 当量-键对错误率.txt (分析-错误率规律.py 9 特征逻辑回归导出)
 """
 import argparse, itertools
 from pathlib import Path
