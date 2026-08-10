@@ -12,7 +12,7 @@
   共享 MLP, 全部 3 段样本训练 (每 trial 3 段)
 
 键位嵌入: e_k = E[k] ∈ ℝ¹²  (30 键各独立, 索引 30 = 空前键)
-交互特征: φ(a,b) = [same_hand, same_finger]
+交互特征: φ(a,b) 8 维 = [同手, 同指, 同键, 列距, 行距, Fitts, 镜像手指, 跨行同指] (2026-08-11 文献扩展)
 
 依据 (实验-特征与目标.py / 实验-分段模型.py):
   - φ 已饱和: 加列差/方向特征均无增益 (实验-方向特征.py)
@@ -41,16 +41,28 @@ KEY_TO_IDX = {c:i for i,c in enumerate(LETTERS)}
 EMPTY = 30  # 空前键索引 (静止起始)
 
 def _precompute_phi():
-    """φ(a,b) = [same_hand, same_finger] — 实验-参数与特征.py 消融:
-    row_diff 冗余 (键嵌入已隐式捕获, 去掉持平), same_hand/same_finger 均必要"""
+    """φ(a,b) 8 维 — 2026-08-11 文献特征扩展 (实验-特征扩展.py):
+    [同手, 同指, 同键, 列距, 行距, Fitts, 镜像手指, 跨行同指]
+    文献依据: İşeri & Ekşioğlu 2015 (列>行>手 重要性排序, 显式几何有独立信息);
+    Fitts (MT = a + b·log2(1+D/W), W=键宽, 行距≈2 键宽); keygen (同指跨行最慢);
+    Grudin 1983 (镜像手指换位). 原 φ2 对照: 5 seed 验证段MAE 38.4→37.4,
+    best-of-10 37.2→36.2 (总 MAE 持平 62.2, R² 0.433→0.435), 方向一致采纳"""
     feats = {}
     for a in LETTERS:
         ca,ra = LETTER_TO_COL[a], LETTER_TO_ROW[a]
         for b in LETTERS:
             cb,rb = LETTER_TO_COL[b], LETTER_TO_ROW[b]
-            feats[(a,b)] = (
-                1.0 if COL_TO_HAND[ca]==COL_TO_HAND[cb] else 0.0,
-                1.0 if COL_TO_FINGER[ca]==COL_TO_FINGER[cb] else 0.0)
+            fa,fb = COL_TO_FINGER[ca], COL_TO_FINGER[cb]
+            same_hand = 1.0 if COL_TO_HAND[ca]==COL_TO_HAND[cb] else 0.0
+            same_fing = 1.0 if fa==fb else 0.0
+            same_key = 1.0 if a==b else 0.0
+            col_d = float(abs(ca-cb))
+            row_d = float(abs(ra-rb))
+            fitts = float(np.log2(1 + np.sqrt(col_d**2 + (2*row_d)**2)))
+            mirror = 1.0 if (not same_hand) and fa+fb==7 else 0.0
+            crsf = 1.0 if same_hand and same_fing and ra!=rb else 0.0
+            feats[(a,b)] = (same_hand, same_fing, same_key, col_d, row_d,
+                            fitts, mirror, crsf)
     return feats
 PHI = _precompute_phi()
 
@@ -65,18 +77,20 @@ class RMSNorm(nn.Module):
         return F.normalize(x, dim=-1) * self.g * x.shape[-1] ** 0.5
 
 class KeystrokeModel(nn.Module):
-    """条件段模型: 键位嵌入 (20 维) + φ(2 特征) + 双线性交互 + MLP 头。
+    """条件段模型: 键位嵌入 (20 维) + φ(8 特征) + 双线性交互 + MLP 头。
     算法对比 (实验-双线性扩容.py, 5 seed 验证集): de20/dh64 单层
     验证MAE 61.7/R² 0.395 反超 CP rank=32 (64.3/0.343) → 成为默认;
     继续加大 (de24/96 单层 65.3 过拟合, de32/128 双层 62.8, de48/192 三层 60.8 方差大)
     无稳定收益 → 默认 de20/dh64。
     激活/归一化 (实验-激活函数.py, 5 seed): relu 最优 (leaky/sigmoid/relu²/silu/swiglu
-    全灭); 隐藏层后 RMSNorm 微增益 59.4/0.401 vs 61.7/0.395 (噪声边缘, 不恶化) → 落地。"""
+    全灭); 隐藏层后 RMSNorm 微增益 59.4/0.401 vs 61.7/0.395 (噪声边缘, 不恶化) → 落地。
+    特征扩展 (实验-特征扩展.py, 2026-08-11): φ 2→8 维 (文献几何/手指特征),
+    5 seed 验证段MAE 38.4→37.4, best-of-10 37.2→36.2 (总 MAE 持平 62.2, R² 0.433→0.435)。"""
     def __init__(self, d_embed=20, d_hidden=64):
         super().__init__()
         self.E_key = nn.Embedding(len(LETTERS) + 1, d_embed)  # 30 键 + 空前键
         self.W = nn.Parameter(torch.randn(3, d_embed, d_embed) * 0.05)  # 3 对双线性交互
-        self.mlp = nn.Sequential(nn.Linear(d_embed*3+2, d_hidden), nn.ReLU(),
+        self.mlp = nn.Sequential(nn.Linear(d_embed*3+8, d_hidden), nn.ReLU(),
                                  RMSNorm(d_hidden), nn.Linear(d_hidden, 1))
     @property
     def _dev(self): return next(self.mlp.parameters()).device
@@ -117,7 +131,7 @@ class CPModel(nn.Module):
         self.V = nn.Embedding(len(LETTERS)+1, rank)   # 首键因子
         self.W = nn.Embedding(len(LETTERS)+1, rank)   # 次键因子
         self.E_key = nn.Embedding(len(LETTERS)+1, d_embed)
-        self.mlp = nn.Sequential(nn.Linear(d_embed*3+2, d_hidden), nn.ReLU(), nn.Linear(d_hidden, 1))
+        self.mlp = nn.Sequential(nn.Linear(d_embed*3+8, d_hidden), nn.ReLU(), nn.Linear(d_hidden, 1))
     @property
     def _dev(self): return next(self.mlp.parameters()).device
     def _batch(self, ids, ph):

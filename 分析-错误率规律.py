@@ -16,7 +16,8 @@ import numpy as np
 sys.path.insert(0, ".")
 from 击键模型 import LETTERS, LETTER_TO_COL, LETTER_TO_ROW, COL_TO_FINGER, COL_TO_HAND
 
-PATH = sys.argv[1] if len(sys.argv) > 1 else "击键测速数据.tsv"
+PATH = sys.argv[1] if len(sys.argv) > 1 and not sys.argv[1].startswith("--") else "击键测速数据.tsv"
+DUAL = "--dual" in sys.argv  # 双向计数: 错按键对 (目标首键,实际错键) 同记 (2026-08-10 实验)
 
 # 键位特征 (9 特征, 2026-08-08 定稿, AUC 0.635):
 #   演进: 8 特征 (删列差 CD, 生理学无依据+零损失) → 7 特征 (删行差 RD,
@@ -53,6 +54,29 @@ def b_leftpinky(a, b):   # BLP b 为左小指 (仅左小指, 右小指是保护�
 def top_row(a): return int(LETTER_TO_ROW[a] == 0)
 def bottom_row(a): return int(LETTER_TO_ROW[a] == 2)
 
+# ── 文献新特征 (2026-08-10 补充, 见下方注释) ─────────
+def mirror_pair(a, b):    # MIR 异手对称手指对 (Grudin 1983: 29% 换位错误发生在异手对称手指)
+    return int(not same_hand(a, b) and _f(a) + _f(b) == 7)
+def cross_row_same_finger(a, b):  # CRS 同指跨行 (keygen: 同指顶↔底行是"最慢最易错"; MacNeilage: 垂直错误主体)
+    return int(same_hand(a, b) and _f(a) == _f(b) and
+               LETTER_TO_ROW[a] != LETTER_TO_ROW[b])
+def adjacent_finger(a, b):  # ADJ 同手相邻手指 (sEMG 共激活, 尤其中指-无名指)
+    return int(same_hand(a, b) and abs(_f(a) - _f(b)) == 1)
+def b_toward_thumb(a, b):   # BTT b 比 a 更靠拇指侧 (Lachnit 1990: 向拇指侧相邻手指误击率最高, 方向不对称)
+    if not same_hand(a, b): return 0
+    # 手指编号 0..3 小指→食指 (左), 4..7 食指→小指 (右); 向拇指侧 = 编号增大 (左) / 减小 (右)
+    return int(_f(b) > _f(a)) if COL_TO_HAND[LETTER_TO_COL[a]] == 0 else int(_f(a) > _f(b))
+
+# 特征集: 9 特征基线 (2026-08-08 定稿) vs 13 特征 (文献扩充)
+FEATS_BASE = [same_hand, same_finger, bad_samecol, bad_ringmid,
+              bad_pinkyring, bad_index2c, b_leftpinky,
+              lambda a, b: top_row(b), lambda a, b: bottom_row(b)]
+FEATS_NEW  = FEATS_BASE + [mirror_pair, cross_row_same_finger,
+                           adjacent_finger, b_toward_thumb]
+NAMES_BASE = ["同手", "同指", "同指同列", "无名-中指", "小指-无名",
+              "同指双列", "b左小指", "b顶行", "b底行"]
+NAMES_NEW  = NAMES_BASE + ["镜像手指", "跨行同指", "相邻手指", "b靠拇指侧"]
+
 # ── 键对事件 (修正统计) ─────────────────────────────
 ok_ev = Counter(); err_ev = Counter()
 def add_events(code, act, ts_ok):
@@ -71,6 +95,10 @@ def add_events(code, act, ts_ok):
     if pos >= 1:
         prev = code[pos-2] if pos >= 2 else "_"
         err_ev[(prev, code[pos-1], code[pos])] += 1
+        # 双向计数 (--dual): 错按键对 (目标首键, 实际错键) 同记 —
+        # 目标键对 P_err 与"错键本身"事件都进模型, 错误事件量翻倍
+        if DUAL and act[pos] in LETTERS and act[pos] != code[pos]:
+            err_ev[(prev, code[pos-1], act[pos])] += 1
 
 rows = list(csv.DictReader(open(PATH, encoding="utf-8"), delimiter="\t"))
 for r in rows:
@@ -119,40 +147,58 @@ layer_rate(lambda a, b: "b左小指" if b_leftpinky(a,b) else "非",
            "b左小指", ["b左小指", "非"])
 layer_rate(lambda a, b: f"b行={LETTER_TO_ROW[b]}", "目标键行",
            [f"b行={r}" for r in range(3)])
+layer_rate(lambda a, b: "镜像手指" if mirror_pair(a,b) else "非",
+           "镜像手指 (异手对称)", ["镜像手指", "非"])
+layer_rate(lambda a, b: "跨行同指" if cross_row_same_finger(a,b) else "非",
+           "跨行同指", ["跨行同指", "非"])
+layer_rate(lambda a, b: "相邻手指" if adjacent_finger(a,b) else "非",
+           "相邻手指 (同手)", ["相邻手指", "非"])
+layer_rate(lambda a, b: "b靠拇指" if b_toward_thumb(a,b) else "b离拇指" if adjacent_finger(a,b) else "非",
+           "相邻方向", ["b靠拇指", "b离拇指", "非"])
 
-# ── 2. 简单模型: 特征逻辑回归 ───────────────────────
+# ── 2. 简单模型: 特征逻辑回归 (基线 vs 文献扩充对比) ─
 print("\n=== 特征逻辑回归 (估算键对正确率) ===")
-def feats(a, b):
-    return [1.0,
-            same_hand(a, b), same_finger(a, b),
-            bad_samecol(a, b), bad_ringmid(a, b),
-            bad_pinkyring(a, b), bad_index2c(a, b),
-            b_leftpinky(a, b),
-            top_row(b), bottom_row(b)]
-X = np.array([feats(a, b) for a, b, _ in events], dtype=np.float32)
-Y = np.array([1.0 if ok else 0.0 for _, _, ok in events], dtype=np.float32)  # 1=正确
-# 标准化 (除第一列截距)
-mu, sd = X[:, 1:].mean(0), X[:, 1:].std(0) + 1e-6
-Xs = np.concatenate([X[:, :1], (X[:, 1:] - mu) / sd], axis=1)
-
-# 5-fold AUC + 系数 (sklearn, 带类权重)
 from sklearn.linear_model import LogisticRegression
 from sklearn.model_selection import StratifiedKFold
 from sklearn.metrics import roc_auc_score
 
-aucs = []
-skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=0)
-for tr, te in skf.split(Xs, Y):
-    m = LogisticRegression(max_iter=2000, C=10.0)
-    m.fit(Xs[tr], Y[tr])
-    aucs.append(roc_auc_score(Y[te], m.predict_proba(Xs[te])[:, 1]))
-print(f"5-fold AUC = {np.mean(aucs):.3f} ± {np.std(aucs):.3f}")
+def feats(a, b, fs):
+    return [1.0] + [f(a, b) for f in fs]
+
+Y = np.array([1.0 if ok else 0.0 for _, _, ok in events], dtype=np.float32)  # 1=正确
+
+def fit_and_eval(fs, label):
+    """5-fold AUC + 标准化参数 (截距列除外)"""
+    X = np.array([feats(a, b, fs) for a, b, _ in events], dtype=np.float32)
+    mu, sd = X[:, 1:].mean(0), X[:, 1:].std(0) + 1e-6
+    Xs = np.concatenate([X[:, :1], (X[:, 1:] - mu) / sd], axis=1)
+    aucs = []
+    skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=0)
+    for tr, te in skf.split(Xs, Y):
+        m = LogisticRegression(max_iter=2000, C=10.0)
+        m.fit(Xs[tr], Y[tr])
+        aucs.append(roc_auc_score(Y[te], m.predict_proba(Xs[te])[:, 1]))
+    auc, sd_auc = np.mean(aucs), np.std(aucs)
+    print(f"  {label:24s}: 5-fold AUC = {auc:.3f} ± {sd_auc:.3f}  ({len(fs)} 特征, N={len(Y)})")
+    return Xs, mu, sd, auc
+
+Xsb, mub, sdb, auc_base = fit_and_eval(FEATS_BASE, "基线 9 特征")
+Xsn, mun, sdn, auc_new = fit_and_eval(FEATS_NEW, "文献扩充 13 特征")
+
+# 用 AUC 高者落地 (系数/验证/导出统一用最终特征集)
+if auc_new >= auc_base:
+    FEATS_F, NAMES_F = FEATS_NEW, NAMES_NEW
+    Xs, mu, sd, auc_use = Xsn, mun, sdn, auc_new
+    print(f"  → 采用 13 特征扩充 (AUC {auc_new:.3f} ≥ 基线 {auc_base:.3f})")
+else:
+    FEATS_F, NAMES_F = FEATS_BASE, NAMES_BASE
+    Xs, mu, sd, auc_use = Xsb, mub, sdb, auc_base
+    print(f"  → 保留 9 特征基线 (AUC {auc_base:.3f} ≥ 扩充 {auc_new:.3f})")
 
 # 全量拟合系数 (标准化空间 → 还原到原始特征尺度)
 m = LogisticRegression(max_iter=2000, C=10.0)
 m.fit(Xs, Y)
-names = ["截距", "同手", "同指", "同指同列", "无名-中指", "小指-无名",
-         "同指双列", "b左小指", "b顶行", "b底行"]
+names = ["截距"] + NAMES_F
 w_raw = np.zeros(len(names))
 # 还原: logit = intercept + c0·x0(常数列=1.0) + Σ c_i·(x_i-μ)/σ
 w_raw[0] = m.intercept_[0] + m.coef_[0][0] - (m.coef_[0][1:] * mu / sd).sum()
@@ -166,7 +212,7 @@ prob = m.predict_proba(Xs)[:, 1]
 print("\n公式验证 (还原系数 logit vs 模型输出):")
 for ab_ in ["ab", "fg", "aa", "sz"]:
     a_, b_ = ab_[0], ab_[1]
-    x = np.array(feats(a_, b_), dtype=np.float32)
+    x = np.array(feats(a_, b_, FEATS_F), dtype=np.float32)
     logit = w_raw[0] + (w_raw[1:] * x[1:]).sum()
     p_formula = 1 / (1 + np.exp(-logit))
     xs = np.concatenate([x[:1], (x[1:] - mu) / sd])
@@ -205,7 +251,7 @@ with open("当量-键对错误率.txt", "w", encoding="utf-8") as f:
     f.write("pair\terr_rate\n")
     for a in LETTERS:
         for b in LETTERS:
-            x = np.array([feats(a, b)], dtype=np.float32)
+            x = np.array([feats(a, b, FEATS_F)], dtype=np.float32)
             xs = np.concatenate([x[:, :1], (x[:, 1:] - mu) / sd], axis=1)
             p_corr = float(m.predict_proba(xs)[0, 1])
             f.write(f"{a}{b}\t{1 - p_corr:.4f}\n")
