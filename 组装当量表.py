@@ -20,12 +20,15 @@ from pathlib import Path
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--expected", action="store_true", help="同时导出期望当量表")
+parser.add_argument("--baseline", action="store_true",
+                    help="同时导出传统两键累加对照表 (当量-两键累加-2-4键.txt, 仅空前键表逐对累加)")
 args = parser.parse_args()
 
 PROJ = Path(__file__).resolve().parent
 SEG = PROJ / "当量-段表.txt"
 OUT = PROJ / "当量-2-4键.txt"
 OUT_EXP = PROJ / "当量-期望-2-4键.txt"
+OUT_BASE = PROJ / "当量-两键累加-2-4键.txt"   # 传统基线: T = Σ B[ki,ki+1] (B=空前键切片)
 ERR_MS = 500.0   # 固定错误损失 (ms): 退格 + 注意力 + 重输, 数据推导 455 近似
 L = "abcdefghijklmnopqrstuvwxyz;,./"  # 30 键 (3 行 10 列完整 QWERTY)
 
@@ -77,6 +80,26 @@ def main():
 
     total = len(L)**2 + len(L)**3 + len(L)**4
     print(f"输出: {OUT} ({total:,} 条)")
+
+    # ── 期望当量表 (--expected): 段当量 + 500ms×P_err, 同基准归一化 ──
+    # ── 两键累加对照表 (--baseline): 传统方法 T = Σ B[ki,ki+1] ──
+    # 只用空前键切片逐对累加, 不含前键条件 — 中间键对的前键从不是空,
+    # 该方法系统性低估整串 (对比见 README 章节 / 击键模型.py --compare)
+    if args.baseline:
+        with open(OUT_BASE, "w", encoding="utf-8") as f:
+            f.write(f"# 两键累加对照 (传统基线, 基准=最快速键对 {mat_min:.0f}ms)\n")
+            f.write("code\t当量\n")
+            buf = []
+            for a, b in itertools.product(L, L):           # aa-zz (与条件法相同)
+                buf.append(f"{a}{b}\t{B[(a,b)] / mat_min:.2f}\n")
+            for a, b, c in itertools.product(L, L, L):     # aaa-zzz
+                v = (B[(a,b)] + B[(b,c)]) / mat_min
+                buf.append(f"{a}{b}{c}\t{v:.2f}\n")
+            for a, b, c, d in itertools.product(L, L, L, L):  # aaaa-zzzz
+                v = (B[(a,b)] + B[(b,c)] + B[(c,d)]) / mat_min
+                buf.append(f"{a}{b}{c}{d}\t{v:.2f}\n")
+            f.writelines(buf)
+        print(f"输出: {OUT_BASE} ({total:,} 条, 两键累加基线)")
 
     # ── 期望当量表 (--expected): 段当量 + 500ms×P_err, 同基准归一化 ──
     if args.expected:
