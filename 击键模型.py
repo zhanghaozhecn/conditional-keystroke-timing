@@ -201,6 +201,49 @@ def mad_filter_segments(data, tgt, k=3.0):
     data_full = [d for d, ok in zip(data, tri_ok) if ok]
     return keep, data_full
 
+def residual_filter_segments(data, prev, a, b, ph, tgt, k=3.0, m0_seeds=5):
+    """B4b 两阶段残差剔除 (2026-08-12 落地, 实验-剔除优化/诊断/修复/终局):
+      1. B0 段位 MAD 剔除 → 训 M0 (m0_seeds 验证集选优) — 干净模型提供期望行为
+      2. M0 推全数据 → 残差 |y-ŷ|
+      3. 残差按键对 (a,b) 分桶 MAD 剔除 — 键对系统性偏差中心化, 只删
+         键对内残差离群 (真注意力中断)。模型学不会的键对 (pq 等跨手小指
+         难键对) 不被误删 — 全局残差法会把"比模型预测慢"的真实慢段全删,
+         pq 当量 162→95ms 失真 (循环论证, 实验-剔除过删检查.py E2);
+         键对分桶修复后当量恢复 (实验-剔除修复.py)。
+      依据: 固定测试集终局对比各方案 44-47ms 在噪声内 (剔除收益在当量
+      稳健性而非预测精度); 剔除率 ~6% 在文献范围 (5-10%)。
+      返回 (keep 掩码, 三段齐全 trial 子集)。"""
+    keep0 = mad_filter_segments(data, tgt)[0]
+    # M0: 段位 MAD 干净数据训练, 验证集选优 (与主训练同协议)
+    best_va, M0 = float("inf"), None
+    for s in range(m0_seeds):
+        m = KeystrokeModel()
+        _, va = train(m, prev[keep0], a[keep0], b[keep0], ph[keep0], tgt[keep0], seed=s)
+        if va < best_va:
+            best_va, M0 = va, m
+    ids = torch.tensor(np.stack([prev, a, b], axis=1))
+    with torch.no_grad():
+        pred = M0._batch(ids, torch.tensor(ph)).numpy()
+    resid = np.abs(tgt - pred)
+    # 残差按键对分桶 MAD (键对系统性偏差中心化)
+    keep = np.ones(len(tgt), dtype=bool)
+    order = np.lexsort((b, a))
+    i = 0
+    while i < len(order):
+        j = i
+        while j + 1 < len(order) and (a[order[j+1]], b[order[j+1]]) == (a[order[i]], b[order[i]]):
+            j += 1
+        idx = order[i:j+1]
+        v = resid[idx]
+        med = np.median(v)
+        mad = np.median(np.abs(v - med))
+        sigma = 1.4826 * mad if mad > 0 else 1.0
+        keep[idx] = np.abs(v - med) < k * sigma
+        i = j + 1
+    tri_ok = keep.reshape(-1, 3).all(axis=1)
+    data_full = [d for d, ok in zip(data, tri_ok) if ok]
+    return keep, data_full
+
 def build_tensors(data):
     """全部段样本 (每 trial 3 段): (prev, a, b, phi, target)"""
     segs = []
@@ -334,8 +377,8 @@ def main():
     print(f"4 键样本: {len(data)}, 段样本: {len(data)*3}")
 
     prev, a, b, ph, tgt = build_tensors(data)
-    keep, data_full = mad_filter_segments(data, tgt)
-    print(f"段级剔除 (MAD k=3): 保留 {int(keep.sum())}/{len(tgt)} 段, 完整 trial {len(data_full)}/{len(data)}")
+    keep, data_full = residual_filter_segments(data, prev, a, b, ph, tgt)
+    print(f"段级剔除 (B4b 两阶段残差, 键对分桶 MAD k=3): 保留 {int(keep.sum())}/{len(tgt)} 段, 完整 trial {len(data_full)}/{len(data)}")
     prev, a, b, ph, tgt = prev[keep], a[keep], b[keep], ph[keep], tgt[keep]
 
     # 同参数多次训练结果差异大 (随机初始化+随机划分), best-of-N 用验证集段MAE选最强
