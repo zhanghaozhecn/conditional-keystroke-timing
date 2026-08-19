@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 用段表组装 2-4 键位当量表
-读: 当量-段表.txt (27×26×26, S(p,a,b) ms, _=空前键)
+读: 当量-段表.txt (31×30×30, S(p,a,b) ms, _=空前键)
 写: 当量-2-4键.txt (code\\t当量, 归一化), 顺序 aa-zz, aaa-zzz, aaaa-zzzz
 
 公式:
@@ -84,7 +84,7 @@ def main():
     # ── 期望当量表 (--expected): 段当量 + 500ms×P_err, 同基准归一化 ──
     # ── 两键累加对照表 (--baseline): 传统方法 T = Σ B[ki,ki+1] ──
     # 只用空前键切片逐对累加, 不含前键条件 — 中间键对的前键从不是空,
-    # 该方法系统性低估整串 (对比见 README 章节 / 击键模型.py --compare)
+    # 该方法系统性低估整串 (对比见 README §5.2 / 对比-条件vs两键.py)
     if args.baseline:
         with open(OUT_BASE, "w", encoding="utf-8") as f:
             f.write(f"# 两键累加对照 (传统基线, 基准=最快速键对 {mat_min:.0f}ms)\n")

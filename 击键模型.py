@@ -4,14 +4,14 @@
   研究阶段（默认）: 训练段模型 + 报告总时间 MAE/R²
   完成阶段 --full: 追加导出段当量母表 ((len(LETTERS)+1)×len(LETTERS)², 其他当量由后续模块查表组合)
 
-架构: 每段 t = MLP(e_prev, e_a, e_b, φ(a,b))  (前键为空的段 = 两键当量)
+架构: 每段 t = 双线性交互(e_p,e_a,e_b) + MLP([e_p;e_a;e_b;φ(a,b)])  (前键为空的段 = 两键当量)
   前键空 = 索引 30 (可学习的"静止起始"嵌入)
   两键当量  T₂(ab)       = S(∅, a, b)
   三键当量  T₃(abc)      = S(∅,a,b) + S(a,b,c)
   四键当量  T₄(abcd)     = S(∅,a,b) + S(a,b,c) + S(b,c,d)
   共享 MLP, 全部 3 段样本训练 (每 trial 3 段)
 
-键位嵌入: e_k = E[k] ∈ ℝ¹²  (30 键各独立, 索引 30 = 空前键)
+键位嵌入: e_k = E[k] ∈ ℝ²⁰  (30 键各独立, 索引 30 = 空前键)
 交互特征: φ(a,b) 8 维 = [同手, 同指, 同键, 列距, 行距, Fitts, 镜像手指, 跨行同指] (2026-08-11 文献扩展)
 
 依据 (实验-特征与目标.py / 实验-分段模型.py):
@@ -19,8 +19,17 @@
   - 段间强交互: 相加模型 MAE 120ms vs 条件段模型 90.5ms
   - 前键条件决定性: 无前键 R² = -0.94
 """
-import sys, numpy as np, torch, torch.nn as nn, torch.nn.functional as F
+import argparse, sys, numpy as np, torch, torch.nn as nn, torch.nn.functional as F
 from pathlib import Path
+
+# 运行环境固定 (可复现性, 2026-08-18 实测):
+# ① 单线程 — 模型仅 6.4k 参数/批 256, 多线程开销 > 收益 (单线程 12s vs 多线程 15s/次);
+# ② 导入时播种 torch 默认 RNG — 新进程默认 RNG 是熵播种的, 模型构造 (嵌入/线性层
+#   初始化) 依赖它, 而 train(seed) 只重播轨迹不重播构造 → 历史上同命令重跑结果漂移
+#   ("±1.4ms 种子波动"的主要来源)。播种后同代码+同数据跨进程逐位可复现;
+#   best-of-N 的多次构造沿确定性流推进, 初始化仍互不相同, 多样性不受影响。
+torch.set_num_threads(1)
+torch.manual_seed(0)
 
 # ═══════════════════ 键盘布局 ═══════════════════
 # 3 行 10 列完整 QWERTY: 30 键 (26 字母 + ; , . /)
@@ -45,9 +54,11 @@ def _precompute_phi():
     [同手, 同指, 同键, 列距, 行距, Fitts, 镜像手指, 跨行同指]
     文献依据: İşeri & Ekşioğlu 2015 (列>行>手 重要性排序, 显式几何有独立信息);
     Fitts (MT = a + b·log2(1+D/W), W=键宽, 行距≈2 键宽); keygen (同指跨行最慢);
-    Grudin 1983 (镜像手指换位). 消融 (实验-特征消融.py, 2026-08-11):
-    逐特征 LOO 全部持平 (Δ<0.2ms, seed 方差 ±1ms) — 显式特征在嵌入模型上
-    无独立贡献, 增益在噪声内; 保留 φ8 因文献可解释性 (特征权重可诊断), 非性能"""
+    Grudin 1983 (镜像手指换位). 消融两轮:
+    - 逐特征 LOO 全部持平 (实验-特征消融.py, 2026-08-11, Δ<0.2ms) — φ 特征间互为冗余
+    - 整体删除 +1.7ms (实验-结构消融.py, 2026-08-14, 无泄漏 trial 测试口径) — φ 作为整体
+      提供嵌入补不上的几何先验, 价值在稀疏三元组外推 (2/3 段表条目零样本); LOO 在
+      训练分布内做所以测不出。保留 φ8 有实证支撑 (见 README §6.4)"""
     feats = {}
     for a in LETTERS:
         ca,ra = LETTER_TO_COL[a], LETTER_TO_ROW[a]
@@ -77,7 +88,28 @@ class RMSNorm(nn.Module):
     def forward(self, x):
         return F.normalize(x, dim=-1) * self.g * x.shape[-1] ** 0.5
 
-class KeystrokeModel(nn.Module):
+class _SegModel(nn.Module):
+    """段模型公共接口: 单段/整串预测 + 模型 IO, 子类只需实现 _batch(ids, ph)。
+    (KeystrokeModel / CPModel / 结构消融变体共用; 基类不含参数, 不影响 state_dict 键名)"""
+    @property
+    def _dev(self): return next(self.mlp.parameters()).device
+    def seg(self, prev, a, b):
+        """单段预测 (字符串输入, prev=None 表空前键)"""
+        ids = torch.tensor([[EMPTY if prev is None else KEY_TO_IDX[prev],
+                             KEY_TO_IDX[a], KEY_TO_IDX[b]]])
+        ph = torch.tensor([PHI[(a,b)]])
+        return self._batch(ids, ph).item()
+    def tri_total(self, abc):
+        a,b,c = abc
+        return self.seg(None,a,b) + self.seg(a,b,c)
+    def total(self, code):
+        a,b,c,d = code
+        return self.seg(None,a,b) + self.seg(a,b,c) + self.seg(b,c,d)
+    def nparam(self): return sum(p.numel() for p in self.parameters())
+    def save(self, path): torch.save(self.state_dict(), path)
+    def load(self, path): self.load_state_dict(torch.load(path, weights_only=True))
+
+class KeystrokeModel(_SegModel):
     """条件段模型: 键位嵌入 (20 维) + φ(8 特征) + 双线性交互 + MLP 头。
     算法对比 (实验-双线性扩容.py, 5 seed 验证集): de20/dh64 单层
     验证MAE 61.7/R² 0.395 反超 CP rank=32 (64.3/0.343) → 成为默认;
@@ -87,7 +119,10 @@ class KeystrokeModel(nn.Module):
     全灭); 隐藏层后 RMSNorm 微增益 59.4/0.401 vs 61.7/0.395 (噪声边缘, 不恶化) → 落地。
     特征扩展 (实验-特征扩展.py/实验-特征消融.py, 2026-08-11): φ 2→8 维
     (文献几何/手指特征), 粗对比 38.4→37.4 似有增益, 但逐特征 LOO 全部持平
-    (Δ<0.2ms) — 增益在噪声内, 保留 φ8 因文献可解释性而非性能。"""
+    (Δ<0.2ms)。结构消融 (实验-结构消融.py, 2026-08-14): 整体删 φ +1.7ms —
+    φ 作为整体的价值在稀疏三元组外推, 保留有实证支撑 (README §6.4)。
+    结构消融同轮: W3 跨键双线性 +2.1ms (最值钱组件), MLP 头仅 +0.5ms,
+    huber/l1 无收益 — 现有元素全部保留, 结构已收敛 (残差/固有噪声 = 0.91)。"""
     def __init__(self, d_embed=20, d_hidden=64):
         super().__init__()
         self.E_key = nn.Embedding(len(LETTERS) + 1, d_embed)  # 30 键 + 空前键
@@ -107,23 +142,8 @@ class KeystrokeModel(nn.Module):
                torch.einsum('bi,ij,bj->b', e[:,0], self.W[2], e[:,2]))
         mlp = self.mlp(torch.cat([e.reshape(B, -1), ph.to(self._dev).reshape(B, -1)], dim=1)).squeeze(-1)
         return bil + mlp
-    def seg(self, prev, a, b):
-        """单段预测 (字符串输入, prev=None 表空前键)"""
-        ids = torch.tensor([[EMPTY if prev is None else KEY_TO_IDX[prev],
-                             KEY_TO_IDX[a], KEY_TO_IDX[b]]])
-        ph = torch.tensor([PHI[(a,b)]])
-        return self._batch(ids, ph).item()
-    def tri_total(self, abc):
-        a,b,c = abc
-        return self.seg(None,a,b) + self.seg(a,b,c)
-    def total(self, code):
-        a,b,c,d = code
-        return self.seg(None,a,b) + self.seg(a,b,c) + self.seg(b,c,d)
-    def nparam(self): return sum(p.numel() for p in self.parameters())
-    def save(self, path): torch.save(self.state_dict(), path)
-    def load(self, path): self.load_state_dict(torch.load(path, weights_only=True))
 
-class CPModel(nn.Module):
+class CPModel(_SegModel):
     """CP 张量分解: S(p,a,b) ≈ Σ_r U(p)·V(a)·W(b) + MLP 头 (三向联合交互)。
     备选架构 (--model cp): 双线性扩容后验证集 R² 0.395 vs CP 0.343 被反超
     (实验-双线性扩容.py, 5 seed); 保留作对照。rank 扫描 8→32 提升、48 回落。"""
@@ -144,21 +164,6 @@ class CPModel(nn.Module):
         e = self.E_key(ids)
         mlp = self.mlp(torch.cat([e.reshape(B, -1), ph.to(self._dev).reshape(B, -1)], dim=1)).squeeze(-1)
         return cp + mlp
-    def seg(self, prev, a, b):
-        """单段预测 (字符串输入, prev=None 表空前键)"""
-        ids = torch.tensor([[EMPTY if prev is None else KEY_TO_IDX[prev],
-                             KEY_TO_IDX[a], KEY_TO_IDX[b]]])
-        ph = torch.tensor([PHI[(a,b)]])
-        return self._batch(ids, ph).item()
-    def tri_total(self, abc):
-        a,b,c = abc
-        return self.seg(None,a,b) + self.seg(a,b,c)
-    def total(self, code):
-        a,b,c,d = code
-        return self.seg(None,a,b) + self.seg(a,b,c) + self.seg(b,c,d)
-    def nparam(self): return sum(p.numel() for p in self.parameters())
-    def save(self, path): torch.save(self.state_dict(), path)
-    def load(self, path): self.load_state_dict(torch.load(path, weights_only=True))
 
 # ═══════════════════ 数据 ═══════════════════
 
@@ -174,7 +179,7 @@ def load_data(path):
             if len(code)!=4 or not all(c in LETTERS for c in code): continue
             try:
                 bd,cd,dd = float(row[hdr["b_d"]]),float(row[hdr["c_d"]]),float(row[hdr["d_d"]])
-            except: continue
+            except ValueError: continue
             if bd<=0 or cd<=bd or dd<=cd: continue
             data.append((code,[bd,cd,dd]))
     return data
@@ -212,6 +217,9 @@ def residual_filter_segments(data, prev, a, b, ph, tgt, k=3.0, m0_seeds=5):
          键对分桶修复后当量恢复 (实验-剔除修复.py)。
       依据: 固定测试集终局对比各方案 44-47ms 在噪声内 (剔除收益在当量
       稳健性而非预测精度); 剔除率 ~6% 在文献范围 (5-10%)。
+      注意: 最终 keep 仅由第 2 阶段在全数据上的键对分桶残差判定 (替换而非
+      交集第 1 阶段 — keep0 只用于定义 M0 训练集; 温和离群段被键对内残差
+      判定"复活"属设计行为, 实测 205 段/16503, 中位 257ms)。
       返回 (keep 掩码, 三段齐全 trial 子集)。"""
     keep0 = mad_filter_segments(data, tgt)[0]
     # M0: 段位 MAD 干净数据训练, 验证集选优 (与主训练同协议)
@@ -225,21 +233,19 @@ def residual_filter_segments(data, prev, a, b, ph, tgt, k=3.0, m0_seeds=5):
     with torch.no_grad():
         pred = M0._batch(ids, torch.tensor(ph)).numpy()
     resid = np.abs(tgt - pred)
-    # 残差按键对分桶 MAD (键对系统性偏差中心化)
+    # 残差按键对分桶 MAD (键对系统性偏差中心化)。分组 = 键对编码为单整数键后
+    # 排序切分 (与 lexsort+逐段边界扫描等价; 2026-08-18 向量化; 实测 900 桶
+    # 最小 n=6, 无小桶 MAD 退化)
+    key = a.astype(np.int64) * len(LETTERS) + b
+    order = np.argsort(key, kind="stable")
+    bounds = np.flatnonzero(np.diff(key[order]) != 0) + 1
     keep = np.ones(len(tgt), dtype=bool)
-    order = np.lexsort((b, a))
-    i = 0
-    while i < len(order):
-        j = i
-        while j + 1 < len(order) and (a[order[j+1]], b[order[j+1]]) == (a[order[i]], b[order[i]]):
-            j += 1
-        idx = order[i:j+1]
+    for idx in np.split(order, bounds):
         v = resid[idx]
         med = np.median(v)
         mad = np.median(np.abs(v - med))
         sigma = 1.4826 * mad if mad > 0 else 1.0
         keep[idx] = np.abs(v - med) < k * sigma
-        i = j + 1
     tri_ok = keep.reshape(-1, 3).all(axis=1)
     data_full = [d for d, ok in zip(data, tri_ok) if ok]
     return keep, data_full
@@ -261,15 +267,24 @@ def build_tensors(data):
 
 # ═══════════════════ 训练 ═══════════════════
 
-def train(model, prev, a, b, ph, tgt, epochs=200, seed=0, bs=256, lr=0.001, patience=60):
+def train(model, prev, a, b, ph, tgt, epochs=200, seed=0, bs=256, lr=0.001,
+          patience=60, loss_fn="mse"):
     """批量训练 + 早停 (80/20 随机划分), 模型原地更新, 返回 (全数据段MAE, 验证集段MAE)。
-    验证集 MAE 用于 best-of-N 选优 (选最强模型必须用验证集, 全数据含训练集会偏向过拟合)。"""
+    验证集 MAE 用于 best-of-N 选优 (选最强模型必须用验证集, 全数据含训练集会偏向过拟合)。
+    loss_fn: mse (主流程) | huber50 | l1 (实验-结构消融.py 目标函数变体) — 规范实现,
+    实验-结构消融.py 的 train_v 仅转发至此 (2026-08-18 合并双胞胎实现, 防口径漂移)。
+    判据口径 (勿单侧更改): 早停/存档用验证集 MSE, best-of-N 选优用返回的验证集
+    MAE — 两者错配为已知现状, 历史结论均在此口径下取得。"""
     torch.manual_seed(seed); np.random.seed(seed)
     n = len(tgt); nv = int(n*.2)
     idx = np.random.permutation(n)
     tr_i, va_i = idx[nv:], idx[:nv]
     yt = torch.tensor(tgt, dtype=torch.float32)
-    P, A, B, PH = torch.tensor(prev), torch.tensor(a), torch.tensor(b), torch.tensor(ph)
+    X = torch.stack([torch.tensor(prev), torch.tensor(a), torch.tensor(b)], dim=1)
+    PH = torch.tensor(ph)
+    X_tr, X_va = X[tr_i], X[va_i]
+    PH_tr, PH_va = PH[tr_i], PH[va_i]
+    yt_tr, yt_va = yt[tr_i], yt[va_i]
     opt = torch.optim.Adam(model.parameters(), lr=lr)
     best_va, best_st, pat = float("inf"), None, 0
 
@@ -277,15 +292,19 @@ def train(model, prev, a, b, ph, tgt, epochs=200, seed=0, bs=256, lr=0.001, pati
         model.train()
         perm = torch.randperm(len(tr_i))
         for s in range(0, len(perm), bs):
-            j = torch.tensor(tr_i)[perm[s:s+bs]]
-            pred = model._batch(torch.stack([P[j], A[j], B[j]], dim=1), PH[j])
-            loss = ((pred - yt[j])**2).mean()
+            sel = perm[s:s+bs]
+            pred = model._batch(X_tr[sel], PH_tr[sel])
+            if loss_fn == "mse":
+                loss = ((pred - yt_tr[sel])**2).mean()
+            elif loss_fn == "huber50":
+                loss = F.huber_loss(pred, yt_tr[sel], delta=50.0)
+            else:  # l1
+                loss = (pred - yt_tr[sel]).abs().mean()
             opt.zero_grad(); loss.backward(); opt.step()
 
         model.eval()
         with torch.no_grad():
-            va = ((model._batch(torch.stack([P[va_i], A[va_i], B[va_i]], dim=1), PH[va_i])
-                   - yt[va_i])**2).mean().item()
+            va = ((model._batch(X_va, PH_va) - yt_va)**2).mean().item()
         if va < best_va:
             best_va = va; best_st = {k: v.clone() for k, v in model.state_dict().items()}; pat = 0
         else:
@@ -295,20 +314,39 @@ def train(model, prev, a, b, ph, tgt, epochs=200, seed=0, bs=256, lr=0.001, pati
     model.load_state_dict(best_st)
     model.eval()
     with torch.no_grad():
-        pred = model._batch(torch.stack([P, A, B], dim=1), PH).numpy()
-        va_pred = model._batch(torch.stack([P[va_i], A[va_i], B[va_i]], dim=1), PH[va_i]).numpy()
+        pred = model._batch(X, PH).numpy()
+        va_pred = model._batch(X_va, PH_va).numpy()
     return (float(np.mean(np.abs(pred - tgt))),
-            float(np.mean(np.abs(va_pred - yt[va_i].numpy()))))
+            float(np.mean(np.abs(va_pred - yt_va.numpy()))))
 
-def eval_total(model, data):
-    """四键总时间 MAE/R² (全数据)"""
-    errs, ys = [], []
+def eval_seg(model, prev, a, b, ph, tgt):
+    """段 MAE (任意数据, 一次批量前向)"""
     model.eval()
     with torch.no_grad():
-        for code, ts in data:
-            errs.append(abs(model.total(code) - ts[2]))
-            ys.append(ts[2])
-    errs = np.array(errs); ys = np.array(ys)
+        pred = model._batch(torch.tensor(np.stack([prev, a, b], axis=1)),
+                            torch.tensor(ph)).numpy()
+    return float(np.mean(np.abs(pred - tgt)))
+
+def total_preds(model, data):
+    """四键总时间预测 (ms, float64) — 三段一次批量前向, eval_total/对比脚本共用"""
+    ids, phs = [], []
+    for (x, y, z, w), _ in data:
+        ids += [[EMPTY, KEY_TO_IDX[x], KEY_TO_IDX[y]],
+                [KEY_TO_IDX[x], KEY_TO_IDX[y], KEY_TO_IDX[z]],
+                [KEY_TO_IDX[y], KEY_TO_IDX[z], KEY_TO_IDX[w]]]
+        phs += [PHI[(x, y)], PHI[(y, z)], PHI[(z, w)]]
+    model.eval()
+    with torch.no_grad():
+        pred = model._batch(torch.tensor(ids), torch.tensor(phs)).numpy()
+    return pred.reshape(-1, 3).astype(np.float64).sum(axis=1)
+
+def eval_total(model, data):
+    """四键总时间 MAE/R² (全数据)。数值与逐 trial 逐段求和等价
+    (2026-08-18 批量化: 4539 trial 8.4s → ~0.01s)"""
+    if not data:
+        return float("nan"), float("nan")
+    ys = np.array([ts[2] for _, ts in data])
+    errs = np.abs(total_preds(model, data) - ys)
     mae = float(errs.mean())
     r2 = 1 - float(np.sum(errs**2)) / max(float(np.sum((ys-ys.mean())**2)), 1e-9)
     return mae, r2
@@ -325,7 +363,7 @@ def build_seg_table(model):
         return model._batch(ids, ph).numpy().reshape(n, n, n)
 
 def _bigram_ms(model):
-    """空前键 B[a,b] = S(∅,a,b) ms (未归一化), 形状 (26,26)"""
+    """空前键 B[a,b] = S(∅,a,b) ms (未归一化), 形状 (30,30)"""
     n = len(LETTERS)
     ids = torch.tensor([[EMPTY, KEY_TO_IDX[a], KEY_TO_IDX[b]]
                         for a in LETTERS for b in LETTERS])
@@ -342,7 +380,7 @@ def export_seg_table(model, out_path):
       任意前缀续打: 已打 p, 续打 xyz = S[p,x,y] + S[x,y,z]
     """
     n = len(LETTERS)
-    B = _bigram_ms(model)          # ∅ 切片 26×26
+    B = _bigram_ms(model)          # ∅ 切片 30×30
     F = build_seg_table(model)     # 字母前键 26³
     with open(out_path, "w", encoding="utf-8") as f:
         f.write("# 段当量母表 S(p,a,b): 段时间 ms 原始值 (未归一化, 可除以最小值归一化)\n")
@@ -362,12 +400,14 @@ def export_seg_table(model, out_path):
 # ═══════════════════ 主流程 ═══════════════════
 
 def main():
-    full = "--full" in sys.argv
-    # 模型选择: --model bi (默认, 双线性 de20/dh64 验证集误差最小) | cp (CP 张量分解)
-    model_name = "bi"
-    if "--model" in sys.argv:
-        i = sys.argv.index("--model")
-        if i + 1 < len(sys.argv): model_name = sys.argv[i + 1]
+    ap = argparse.ArgumentParser(description="条件击键当量模型: 训练 + 测试集四宫格评估 + 可选导出")
+    ap.add_argument("--full", action="store_true",
+                    help="追加部署模型训练 (全数据) + 导出段当量表与模型")
+    ap.add_argument("--model", choices=["bi", "cp"], default="bi",
+                    help="bi=双线性 de20/dh64 验证集误差最小 (默认) | cp=CP 张量分解 rank=32")
+    ap.add_argument("--trials", type=int, default=10, help="best-of-N 训练次数")
+    args = ap.parse_args()
+    full, model_name, trials = args.full, args.model, args.trials
     PROJ = Path(__file__).resolve().parent
     DATA = PROJ / "击键测速数据.tsv"
     if not DATA.exists(): print(f"无数据: {DATA}"); sys.exit(1)
@@ -376,41 +416,72 @@ def main():
     data = load_data(str(DATA))
     print(f"4 键样本: {len(data)}, 段样本: {len(data)*3}")
 
-    prev, a, b, ph, tgt = build_tensors(data)
-    keep, data_full = residual_filter_segments(data, prev, a, b, ph, tgt)
-    print(f"段级剔除 (B4b 两阶段残差, 键对分桶 MAD k=3): 保留 {int(keep.sum())}/{len(tgt)} 段, 完整 trial {len(data_full)}/{len(data)}")
+    # ── 主口径划分: 固定 trial 测试集 (2026-08-19 起统一口径; 与 4 个实验脚本同协议) ──
+    rng = np.random.RandomState(2024)
+    idx = rng.permutation(len(data))
+    nt = int(len(data) * .2)
+    test_idx = set(idx[:nt])
+    train_data = [d for i, d in enumerate(data) if i not in test_idx]
+    test_data = [d for i, d in enumerate(data) if i in test_idx]
+    print(f"划分版本: N={len(data)} trial, 测试集 {len(test_data)} ({len(test_data)*100/len(data):.0f}%), 种子 2024")
+    print(f"训练 trial {len(train_data)} / 测试 trial {len(test_data)}")
+
+    # ── 评估模型: 训练集 B4b + best-of-N (测试 trial 的段不进训练/验证, 无泄漏) ──
+    prev, a, b, ph, tgt = build_tensors(train_data)
+    keep, _ = residual_filter_segments(train_data, prev, a, b, ph, tgt)
+    print(f"训练集 B4b 剔除 (键对分桶残差 MAD k=3): 保留 {int(keep.sum())}/{len(tgt)} 段")
     prev, a, b, ph, tgt = prev[keep], a[keep], b[keep], ph[keep], tgt[keep]
 
-    # 同参数多次训练结果差异大 (随机初始化+随机划分), best-of-N 用验证集段MAE选最强
-    # (单次训练秒级, N=10 成本仍低; 选优后最终指标只在最优模型上评估)
-    trials = 10
-    if "--trials" in sys.argv:
-        i = sys.argv.index("--trials")
-        if i + 1 < len(sys.argv): trials = int(sys.argv[i + 1])
     model_name_full = {"bi": "双线性 de20/dh64", "cp": "CP rank=32"}.get(model_name, model_name)
-    print(f"模型: {model_name_full} | 设备: cpu | 参数: {KeystrokeModel().nparam() if model_name=='bi' else CPModel().nparam()} | trials: {trials}")
-
-    print("\n=== 条件段模型训练 (best-of-N, 验证集选优) ===")
-    best_va, best_seg, model = float("inf"), None, None
+    print(f"\n=== 评估模型训练 ({model_name_full}, best-of-{trials}, 验证集选优) ===")
+    best_va, best_m = float("inf"), None
     for t in range(trials):
         m = CPModel() if model_name == "cp" else KeystrokeModel()
         seg_mae, va_mae = train(m, prev, a, b, ph, tgt, seed=t)
         star = ""
         if va_mae < best_va:
-            best_va, best_seg, model = va_mae, seg_mae, m
+            best_va, best_m = va_mae, m
             star = "  ← 新最优"
         print(f"  trial {t+1:2d}/{trials}: 段MAE={seg_mae:5.1f}ms  验证段MAE={va_mae:5.1f}ms{star}")
-    tot_mae, tot_r2 = eval_total(model, data_full)
-    print(f"  最优 (验证段MAE={best_va:.1f}ms): 段 MAE={best_seg:.1f}ms | 总 MAE={tot_mae:.1f}ms | 总 R²={tot_r2:.4f}")
+
+    # 测试集独立 B4b (保留口径; 内部自训 M0, 与训练集剔除无信息交换)
+    tp, ta, tb, tph, tt = build_tensors(test_data)
+    tkeep, test_full = residual_filter_segments(test_data, tp, ta, tb, tph, tt)
+    print(f"测试集 B4b: 保留 {int(tkeep.sum())}/{len(tt)} 段, 完整 trial {len(test_full)}/{len(test_data)}")
+
+    # ── 主口径四宫格 (全数据含训练集口径已于 2026-08-19 废弃) ──
+    seg_full = eval_seg(best_m, tp, ta, tb, tph, tt)
+    tot_full, r2_full = eval_total(best_m, test_data)
+    seg_keep = eval_seg(best_m, tp[tkeep], ta[tkeep], tb[tkeep], tph[tkeep], tt[tkeep])
+    tot_keep, r2_keep = eval_total(best_m, test_full)
+    print(f"\n=== 口径四宫格 (固定 trial 测试集 {len(test_data)}, 参数 {best_m.nparam()}, 验证段MAE={best_va:.1f}) ===")
+    print(f"全口径:   段MAE={seg_full:5.1f}  总MAE={tot_full:5.1f}  R²={r2_full:+.3f}")
+    print(f"保留口径: 段MAE={seg_keep:5.1f}  总MAE={tot_keep:5.1f}  R²={r2_keep:+.3f}")
 
     if not full:
-        print("\n研究模式: 仅训练。加 --full 导出当量表。")
+        print("\n研究模式: 仅训练评估。加 --full 追加部署模型训练 (全数据) + 导出当量表。")
         return
 
+    # ── 部署模型: 全数据 B4b + best-of-N (当量表条目质量优先; 评估指标以上方四宫格为准) ──
+    print(f"\n=== 部署模型 (全数据训练, {trials} trials — 导出用, 指标见上方评估模型) ===")
+    dprev, da, db, dph, dtgt = build_tensors(data)
+    dkeep, _ = residual_filter_segments(data, dprev, da, db, dph, dtgt)
+    print(f"全数据 B4b: 保留 {int(dkeep.sum())}/{len(dtgt)} 段")
+    dprev, da, db, dph, dtgt = dprev[dkeep], da[dkeep], db[dkeep], dph[dkeep], dtgt[dkeep]
+    dbest_va, deploy_m = float("inf"), None
+    for t in range(trials):
+        m = CPModel() if model_name == "cp" else KeystrokeModel()
+        seg_mae, va_mae = train(m, dprev, da, db, dph, dtgt, seed=t)
+        star = ""
+        if va_mae < dbest_va:
+            dbest_va, deploy_m = va_mae, m
+            star = "  ← 新最优"
+        print(f"  trial {t+1:2d}/{trials}: 段MAE={seg_mae:5.1f}ms  验证段MAE={va_mae:5.1f}ms{star}")
+
     print("\n=== 导出 ===")
-    model.save(str(PROJ/"keystroke_model.pt"))
+    deploy_m.save(str(PROJ/"keystroke_model.pt"))
     print(f"  模型 → {PROJ/'keystroke_model.pt'}")
-    export_seg_table(model, str(PROJ/"当量-段表.txt"))
+    export_seg_table(deploy_m, str(PROJ/"当量-段表.txt"))
 
 
 if __name__ == "__main__":
