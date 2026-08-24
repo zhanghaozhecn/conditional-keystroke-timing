@@ -2,13 +2,14 @@
 """
 用段表组装 2-4 键位当量表
 读: 当量-段表.txt (31×30×30, S(p,a,b) ms, _=空前键)
-写: 当量-2-4键.txt (code\\t当量, 归一化), 顺序 aa-zz, aaa-zzz, aaaa-zzzz
+写: 当量-2-4键.txt (code\t当量, 单位 ms 期望键对耗时原值, 2026-08-19 起不再相对归一化),
+   顺序 aa-zz, aaa-zzz, aaaa-zzzz
 
 公式:
   T₂(ab)   = S[_,a,b]
   T₃(abc)  = S[_,a,b] + S[a,b,c]
   T₄(abcd) = S[_,a,b] + S[a,b,c] + S[b,c,d]
-归一化: 除以最快速键对 (空前键最小段)
+当量 = 期望键对/整串耗时 (模型预测的原始 ms 值)
 
 --expected: 同时输出期望当量表 (当量-期望-2-4键.txt)
   期望段当量 = 条件段当量 + 500ms × P_err(a,b)   (错误损失固定 500ms:
@@ -21,7 +22,7 @@ from pathlib import Path
 parser = argparse.ArgumentParser()
 parser.add_argument("--expected", action="store_true", help="同时导出期望当量表")
 parser.add_argument("--baseline", action="store_true",
-                    help="同时导出传统两键累加对照表 (当量-两键累加-2-4键.txt, 仅空前键表逐对累加)")
+                    help="同时导出传统两键累加对照表 (当量-两键累加-2-4键.txt, 仅空前键表逐对累加, 同为 ms)")
 args = parser.parse_args()
 
 PROJ = Path(__file__).resolve().parent
@@ -31,6 +32,7 @@ OUT_EXP = PROJ / "当量-期望-2-4键.txt"
 OUT_BASE = PROJ / "当量-两键累加-2-4键.txt"   # 传统基线: T = Σ B[ki,ki+1] (B=空前键切片)
 ERR_MS = 500.0   # 固定错误损失 (ms): 退格 + 注意力 + 重输, 数据推导 455 近似
 L = "abcdefghijklmnopqrstuvwxyz;,./"  # 30 键 (3 行 10 列完整 QWERTY)
+L26 = "abcdefghijklmnopqrstuvwxyz"
 
 def main():
     # ── 读段表 ──
@@ -57,69 +59,65 @@ def main():
     for a in L:
         for b in L:
             B[(a, b)] = max(0.0, seg[("_", a, b)])
-    # 归一化基准: 限定字母键对 (符号键无样本, 嵌入中性, 会污染最小值)
-    LETTERS26 = "abcdefghijklmnopqrstuvwxyz"
-    mat_min = min(v for (a, b), v in B.items()
-                  if a in LETTERS26 and b in LETTERS26)
-    print(f"基准 (最快速字母键对): {mat_min:.0f}ms")
+    mat_min = min(v for (a, b), v in B.items() if a in L26 and b in L26)
+    print(f"参考 (最快速字母键对): {mat_min:.0f}ms — 仅提示, 不用于归一化")
 
     # ── 组装 + 写入 ──
     with open(OUT, "w", encoding="utf-8") as f:
-        f.write(f"# 2-4 键位当量 (归一化, 基准=最快速键对 {mat_min:.0f}ms)\n")
+        f.write("# 2-4 键位当量 (ms, 期望键对耗时原始值; 2026-08-19 起不再相对归一化)\n")
         f.write("code\t当量\n")
         buf = []
         for a, b in itertools.product(L, L):           # aa-zz
-            buf.append(f"{a}{b}\t{B[(a,b)] / mat_min:.2f}\n")
+            buf.append(f"{a}{b}\t{B[(a,b)]:.2f}\n")
         for a, b, c in itertools.product(L, L, L):     # aaa-zzz
-            v = (B[(a,b)] + seg[(a,b,c)]) / mat_min
+            v = B[(a,b)] + seg[(a,b,c)]
             buf.append(f"{a}{b}{c}\t{v:.2f}\n")
         for a, b, c, d in itertools.product(L, L, L, L):  # aaaa-zzzz
-            v = (B[(a,b)] + seg[(a,b,c)] + seg[(b,c,d)]) / mat_min
+            v = B[(a,b)] + seg[(a,b,c)] + seg[(b,c,d)]
             buf.append(f"{a}{b}{c}{d}\t{v:.2f}\n")
         f.writelines(buf)
 
     total = len(L)**2 + len(L)**3 + len(L)**4
-    print(f"输出: {OUT} ({total:,} 条)")
+    print(f"输出: {OUT} ({total:,} 条, ms)")
 
-    # ── 期望当量表 (--expected): 段当量 + 500ms×P_err, 同基准归一化 ──
     # ── 两键累加对照表 (--baseline): 传统方法 T = Σ B[ki,ki+1] ──
     # 只用空前键切片逐对累加, 不含前键条件 — 中间键对的前键从不是空,
     # 该方法系统性低估整串 (对比见 README §5.2 / 对比-条件vs两键.py)
     if args.baseline:
         with open(OUT_BASE, "w", encoding="utf-8") as f:
-            f.write(f"# 两键累加对照 (传统基线, 基准=最快速键对 {mat_min:.0f}ms)\n")
+            f.write("# 两键累加对照 (传统基线, ms 期望耗时原值)\n")
             f.write("code\t当量\n")
             buf = []
             for a, b in itertools.product(L, L):           # aa-zz (与条件法相同)
-                buf.append(f"{a}{b}\t{B[(a,b)] / mat_min:.2f}\n")
+                buf.append(f"{a}{b}\t{B[(a,b)]:.2f}\n")
             for a, b, c in itertools.product(L, L, L):     # aaa-zzz
-                v = (B[(a,b)] + B[(b,c)]) / mat_min
+                v = B[(a,b)] + B[(b,c)]
                 buf.append(f"{a}{b}{c}\t{v:.2f}\n")
             for a, b, c, d in itertools.product(L, L, L, L):  # aaaa-zzzz
-                v = (B[(a,b)] + B[(b,c)] + B[(c,d)]) / mat_min
+                v = B[(a,b)] + B[(b,c)] + B[(c,d)]
                 buf.append(f"{a}{b}{c}{d}\t{v:.2f}\n")
             f.writelines(buf)
-        print(f"输出: {OUT_BASE} ({total:,} 条, 两键累加基线)")
+        print(f"输出: {OUT_BASE} ({total:,} 条, 两键累加基线, ms)")
 
-    # ── 期望当量表 (--expected): 段当量 + 500ms×P_err, 同基准归一化 ──
+    # ── 期望当量表 (--expected): 段当量 + 500ms×P_err ──
     if args.expected:
         def exp_seg(prev, a, b):
             """期望段当量 = S(prev,a,b) + 500×P_err(a,b)"""
             return seg[(prev, a, b)] + ERR_MS * perr.get(a + b, 0.019)  # 缺省=全局 1.9%
         with open(OUT_EXP, "w", encoding="utf-8") as f:
-            f.write(f"# 期望当量 = 条件段当量 + {ERR_MS:.0f}ms×P_err (基准=最快速键对 {mat_min:.0f}ms)\n")
+            f.write(f"# 期望当量 = 条件段当量 + {ERR_MS:.0f}ms×P_err (ms 期望耗时原值)\n")
             f.write("code\t当量\n")
             buf = []
             for a, b in itertools.product(L, L):       # aa-zz
-                buf.append(f"{a}{b}\t{exp_seg('_', a, b) / mat_min:.2f}\n")
+                buf.append(f"{a}{b}\t{exp_seg('_', a, b):.2f}\n")
             for a, b, c in itertools.product(L, L, L):     # aaa-zzz
-                v = (exp_seg('_', a, b) + exp_seg(a, b, c)) / mat_min
+                v = exp_seg('_', a, b) + exp_seg(a, b, c)
                 buf.append(f"{a}{b}{c}\t{v:.2f}\n")
             for a, b, c, d in itertools.product(L, L, L, L):  # aaaa-zzzz
-                v = (exp_seg('_', a, b) + exp_seg(a, b, c) + exp_seg(b, c, d)) / mat_min
+                v = exp_seg('_', a, b) + exp_seg(a, b, c) + exp_seg(b, c, d)
                 buf.append(f"{a}{b}{c}{d}\t{v:.2f}\n")
             f.writelines(buf)
-        print(f"输出: {OUT_EXP} ({total:,} 条, 期望当量)")
+        print(f"输出: {OUT_EXP} ({total:,} 条, 期望当量, ms)")
 
 if __name__ == "__main__":
     main()

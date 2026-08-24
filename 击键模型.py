@@ -185,10 +185,12 @@ def load_data(path):
     return data
 
 def mad_filter_segments(data, tgt, k=3.0):
-    """段级异常剔除 (MAD 自适应, 按段位置分桶):
-      剔除 |seg - median| ≥ k·1.4826·MAD 的段 (注意力中断; 中位数稳健, 不被长尾污染)。
+    """段级异常剔除 (MAD 自适应, 按段位置分桶; 单侧上围栏 — 异常只可能偏大):
+      剔除 seg ≥ median + k·1.4826·MAD 的段 (注意力中断; 中位数稳健, 不被长尾污染;
+      2026-08-20 起单侧化: 右偏分布下 MAD 下界恒为负, 实测下侧剔除恒 0,
+      双侧公式与单侧数值等价, 单侧与"异常只偏大"语义对齐)。
       不做硬性上下限:
-        - 右偏分布下 MAD 下界恒为 0, 天然保护快段 (实测最快常规击键 15-40ms, 硬下限会误删基准键对)
+        - 快段受单侧语义保护 (实测最快常规击键 15-40ms, 硬下限会误删基准键对)
         - MAD 上界 (实测 265-412ms) 已严于任何固定上限, 500ms 硬顶从不额外触发
       返回 (keep 掩码, 三段齐全的 trial 子集)。实验对比: MAD k=3 总 MAE 89.6→73.4ms,
       R² 0.275→0.314 (实验-剔除对比.py), 优于固定阈值 (600/2000) 与 k=2/4/5。"""
@@ -201,7 +203,7 @@ def mad_filter_segments(data, tgt, k=3.0):
         med = np.median(vals)
         mad = np.median(np.abs(vals - med))
         sigma = 1.4826 * mad if mad > 0 else 1.0
-        keep[idx] &= (np.abs(vals - med) < k * sigma)
+        keep[idx] = vals < med + k * sigma
     tri_ok = keep.reshape(-1, 3).all(axis=1)
     data_full = [d for d, ok in zip(data, tri_ok) if ok]
     return keep, data_full
@@ -209,17 +211,19 @@ def mad_filter_segments(data, tgt, k=3.0):
 def residual_filter_segments(data, prev, a, b, ph, tgt, k=3.0, m0_seeds=5):
     """B4b 两阶段残差剔除 (2026-08-12 落地, 实验-剔除优化/诊断/修复/终局):
       1. B0 段位 MAD 剔除 → 训 M0 (m0_seeds 验证集选优) — 干净模型提供期望行为
-      2. M0 推全数据 → 残差 |y-ŷ|
-      3. 残差按键对 (a,b) 分桶 MAD 剔除 — 键对系统性偏差中心化, 只删
-         键对内残差离群 (真注意力中断)。模型学不会的键对 (pq 等跨手小指
-         难键对) 不被误删 — 全局残差法会把"比模型预测慢"的真实慢段全删,
-         pq 当量 162→95ms 失真 (循环论证, 实验-剔除过删检查.py E2);
-         键对分桶修复后当量恢复 (实验-剔除修复.py)。
+      2. M0 推全数据 → 带符号残差 r = y-ŷ (正 = 比预期慢)
+      3. r 按键对 (a,b) 分桶, 单侧上围栏剔除 r ≥ med + k·1.4826·MAD —
+         键对系统性偏差中心化后只删"比该键对合理预期慢"的段 (真注意力中断);
+         异常只可能偏大: rollover/预备连击 (比预期快) 是真实打字行为不删
+         (2026-08-20 单侧化, 原 |残差| 双侧判据曾把 16%/35% 的删除错放快侧)。
+         模型学不会的键对 (pq 等跨手小指难键对) 不被误删 — 全局残差法会把
+         "比模型预测慢"的真实慢段全删, pq 当量 162→95ms 失真 (循环论证,
+         实验-剔除过删检查.py E2); 键对分桶修复后当量恢复 (实验-剔除修复.py)。
       依据: 固定测试集终局对比各方案 44-47ms 在噪声内 (剔除收益在当量
-      稳健性而非预测精度); 剔除率 ~6% 在文献范围 (5-10%)。
+      稳健性而非预测精度); 剔除率 ~5% 在文献范围 (5-10%)。
       注意: 最终 keep 仅由第 2 阶段在全数据上的键对分桶残差判定 (替换而非
       交集第 1 阶段 — keep0 只用于定义 M0 训练集; 温和离群段被键对内残差
-      判定"复活"属设计行为, 实测 205 段/16503, 中位 257ms)。
+      判定"复活"属设计行为, 属保守方向)。
       返回 (keep 掩码, 三段齐全 trial 子集)。"""
     keep0 = mad_filter_segments(data, tgt)[0]
     # M0: 段位 MAD 干净数据训练, 验证集选优 (与主训练同协议)
@@ -232,10 +236,11 @@ def residual_filter_segments(data, prev, a, b, ph, tgt, k=3.0, m0_seeds=5):
     ids = torch.tensor(np.stack([prev, a, b], axis=1))
     with torch.no_grad():
         pred = M0._batch(ids, torch.tensor(ph)).numpy()
-    resid = np.abs(tgt - pred)
-    # 残差按键对分桶 MAD (键对系统性偏差中心化)。分组 = 键对编码为单整数键后
-    # 排序切分 (与 lexsort+逐段边界扫描等价; 2026-08-18 向量化; 实测 900 桶
-    # 最小 n=6, 无小桶 MAD 退化)
+    resid = tgt - pred    # 带符号残差: 正 = 比模型预期慢 (中断), 负 = 比预期快 (rollover/预备)
+    # 单侧上围栏剔除 (2026-08-20): 异常只可能偏大 — 注意力中断只拖慢不拖快,
+    # 打得比预期快是 rollover/预备连击, 属真实打字行为不删 (双侧 |残差| 判据曾把
+    # 16% (全量) / 35% (测试集) 的删除错放在快侧, 且小桶下围栏会误删"预测特别准"段)。
+    # 按键对分桶中心化后只删 r > med + k·σ (保守方向: 边界段保留; n=1 桶恒保留)。
     key = a.astype(np.int64) * len(LETTERS) + b
     order = np.argsort(key, kind="stable")
     bounds = np.flatnonzero(np.diff(key[order]) != 0) + 1
@@ -245,7 +250,7 @@ def residual_filter_segments(data, prev, a, b, ph, tgt, k=3.0, m0_seeds=5):
         med = np.median(v)
         mad = np.median(np.abs(v - med))
         sigma = 1.4826 * mad if mad > 0 else 1.0
-        keep[idx] = np.abs(v - med) < k * sigma
+        keep[idx] = v < med + k * sigma
     tri_ok = keep.reshape(-1, 3).all(axis=1)
     data_full = [d for d, ok in zip(data, tri_ok) if ok]
     return keep, data_full
@@ -429,7 +434,7 @@ def main():
     # ── 评估模型: 训练集 B4b + best-of-N (测试 trial 的段不进训练/验证, 无泄漏) ──
     prev, a, b, ph, tgt = build_tensors(train_data)
     keep, _ = residual_filter_segments(train_data, prev, a, b, ph, tgt)
-    print(f"训练集 B4b 剔除 (键对分桶残差 MAD k=3): 保留 {int(keep.sum())}/{len(tgt)} 段")
+    print(f"训练集 B4b 剔除 (键对分桶带符号残差, 单侧上围栏 k=3): 保留 {int(keep.sum())}/{len(tgt)} 段")
     prev, a, b, ph, tgt = prev[keep], a[keep], b[keep], ph[keep], tgt[keep]
 
     model_name_full = {"bi": "双线性 de20/dh64", "cp": "CP rank=32"}.get(model_name, model_name)
