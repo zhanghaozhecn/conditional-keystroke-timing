@@ -454,13 +454,10 @@ def main():
     tkeep, test_full = residual_filter_segments(test_data, tp, ta, tb, tph, tt)
     print(f"测试集 B4b: 保留 {int(tkeep.sum())}/{len(tt)} 段, 完整 trial {len(test_full)}/{len(test_data)}")
 
-    # ── 主口径四宫格 (全数据含训练集口径已于 2026-08-19 废弃) ──
-    seg_full = eval_seg(best_m, tp, ta, tb, tph, tt)
-    tot_full, r2_full = eval_total(best_m, test_data)
+    # ── 主指标: 保留口径 (2026-08-26 起默认只展示保留口径, 全口径需时另行说明) ──
     seg_keep = eval_seg(best_m, tp[tkeep], ta[tkeep], tb[tkeep], tph[tkeep], tt[tkeep])
     tot_keep, r2_keep = eval_total(best_m, test_full)
-    print(f"\n=== 口径四宫格 (固定 trial 测试集 {len(test_data)}, 参数 {best_m.nparam()}, 验证段MAE={best_va:.1f}) ===")
-    print(f"全口径:   段MAE={seg_full:5.1f}  总MAE={tot_full:5.1f}  R²={r2_full:+.3f}")
+    print(f"\n=== 主指标 (固定 trial 测试集 {len(test_data)}, 保留口径, 参数 {best_m.nparam()}, 验证段MAE={best_va:.1f}) ===")
     print(f"保留口径: 段MAE={seg_keep:5.1f}  总MAE={tot_keep:5.1f}  R²={r2_keep:+.3f}")
 
     if not full:
