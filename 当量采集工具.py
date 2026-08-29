@@ -278,7 +278,9 @@ class SpeedTest:
         if delay_ms is None:
             delay_ms = random.randint(300, 800)
         self.phase = "blocked"
-        self.root.after(delay_ms, self.new_code())
+        # 传方法本身而非调用 (带括号 = 立即同步执行 new_code, 试次间延迟失效:
+        # 08-29 实测该回归使 时间显示被同帧清除 + 无节律间隔导致按键连打成卡壳)
+        self.root.after(delay_ms, self.new_code)
 
     def run(self):
         self.root.mainloop()
