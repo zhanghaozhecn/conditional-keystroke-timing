@@ -202,11 +202,18 @@ class SpeedTest:
     def _record(self, ok):
         """ok=True: 正确试次; ok=False: 错误试次"""
         downs = [(e[1], e[2]) for e in self.events if e[0] == 'd']
-        # 释放时间按 key 匹配（释放顺序不一定等于按下顺序）
-        up_dict = {}
+        # 释放时间按 (键, 按下次序) FIFO 配对 — 同键连击的各次按下对应各自的释放
+        # (v1 起的缺陷, 08-29 发现: 按键字符只留首次释放, 同字母位置共用首释时间,
+        #  1342/1418 重复字母行受影响且早于自身按下时间; 游离释放=无对应按下, 忽略)
+        pending, matched = {}, {}
         for e in self.events:
-            if e[0] == 'u' and e[1] not in up_dict:
-                up_dict[e[1]] = e[2]
+            if e[0] == 'd':
+                pending.setdefault(e[1], []).append(e[2])
+            else:  # 'u'
+                q = pending.get(e[1])
+                if q:
+                    q.pop(0)
+                    matched.setdefault(e[1], []).append(e[2])
         n = self.nkeys
 
         # 按下时间戳 (ms): 按先后顺序, 不足 4 位填 0 (文件格式固定 4 列)
@@ -214,14 +221,19 @@ class SpeedTest:
         while len(ts_d) < 4:
             ts_d.append(0.0)
 
-        # 释放时间戳 (ms): 按 code 键位对应 (不足 4 键补空, 文件格式固定 4 列)
+        # 释放时间戳 (ms): 按 code 键位对应 (不足 4 键补空, 文件格式固定 4 列);
+        # 同字母多次出现按出现次序取该键第 i 次释放
         if ok:
             keys = list(self.code)
         else:
             keys = [d[0] for d in downs[:n]]
         while len(keys) < 4:
             keys.append('')
-        ts_u = [up_dict.get(keys[i], 0.0) * 1000 for i in range(4)]
+        seen, ts_u = {}, []
+        for ch in keys:
+            o = seen.get(ch, 0); seen[ch] = o + 1
+            rl = matched.get(ch, [])
+            ts_u.append(rl[o] * 1000 if o < len(rl) else 0.0)
 
         actual = "".join(d[0] for d in downs) if not ok else ""
         tid = self._trial_num()

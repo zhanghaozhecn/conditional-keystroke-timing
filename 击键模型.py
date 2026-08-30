@@ -211,6 +211,52 @@ def load_data(path):
             data.append((code,[bd,cd,dd]))
     return data
 
+def load_sessions(path):
+    """按 session 时序分组 (OrderedDict, 文件顺序=时间顺序): {session: [(code, ts), ...]}。
+    过滤规则与 load_data 相同。稳定期边界与稳定期口径划分的数据入口。"""
+    from collections import OrderedDict
+    out = OrderedDict()
+    with open(path, encoding="utf-8") as f:
+        hdr = {h:i for i,h in enumerate(f.readline().rstrip("\n").split("\t"))}
+        for line in f:
+            row = line.strip().split("\t")
+            if len(row)<12 or row[hdr.get("error",8)]!="0": continue
+            code = row[hdr["code"]]
+            if len(code)!=4 or not all(c in LETTERS for c in code): continue
+            try:
+                bd,cd,dd = float(row[hdr["b_d"]]),float(row[hdr["c_d"]]),float(row[hdr["d_d"]])
+            except ValueError: continue
+            if bd<=0 or cd<=bd or dd<=cd: continue
+            out.setdefault(row[hdr["session"]], []).append((code,[bd,cd,dd]))
+    return out
+
+def stable_split(data_sessions, band=1.10, ref_last=5, smooth=3, min_sessions=8):
+    """练习效应稳定期边界 + 稳定期数据 (2026-08-30 口径, 用户决策)。
+    方法 (确定性, 无随机):
+      1. 每 session 正确 4 键 trial 的总时 (d_d) 中位
+      2. smooth=3 session 滚动中位平滑 (抗单 session 异常)
+      3. R = 末 ref_last 个平滑值的中位 (当前速度参考)
+      4. 自末位向前找最早的连续满足 平滑值 ≤ R×band 的 session — 其后为稳定期
+         (速度已在当前水平的 band 带内; 之前属练习漂移段, 剔除出训练/测试)
+      min_sessions: 稳定期不足此数打警告 (不阻断)
+    返回 (稳定期数据列表, 描述 str)。
+    依据: 实验 (README §6.7) — 混合分布使全量模型对近期状态偏慢 ~12ms;
+    错误率模型不受练习影响 (状态变量), 仍用全量数据 (分析-错误率规律.py)。"""
+    names = list(data_sessions.keys())
+    med = np.array([np.median([ts[2] for _, ts in data_sessions[s]]) for s in names])
+    sm = np.array([np.median(med[max(0, i - smooth + 1):i + 1]) for i in range(len(med))])
+    R = float(np.median(sm[-ref_last:]))
+    k = len(sm)
+    while k - 1 >= 0 and sm[k - 1] <= R * band:
+        k -= 1
+    stable = [t for s in names[k:] for t in data_sessions[s]]
+    n_st = len(sm) - k
+    warn = f"  ⚠ 稳定期仅 {n_st} session (< {min_sessions}), 样本偏少" if n_st < min_sessions else ""
+    desc = (f"稳定期: session[{k}] {names[k]} 起 ({n_st}/{len(names)} session, "
+            f"trial {len(stable)}/{sum(len(v) for v in data_sessions.values())}, "
+            f"R={R:.0f}ms, 带=R×{band:.2f}){warn}")
+    return stable, desc
+
 def mad_filter_segments(data, tgt, k=3.0):
     """段级异常剔除 (MAD 自适应, 按段位置分桶; 单侧上围栏 — 异常只可能偏大):
       剔除 seg ≥ median + k·1.4826·MAD 的段 (注意力中断; 中位数稳健, 不被长尾污染;
@@ -451,17 +497,21 @@ def main():
     if not DATA.exists(): print(f"无数据: {DATA}"); sys.exit(1)
 
     print(f"加载: {DATA}")
-    data = load_data(str(DATA))
-    print(f"4 键样本: {len(data)}, 段样本: {len(data)*3}")
+    data_sessions = load_sessions(str(DATA))
+    n_all = sum(len(v) for v in data_sessions.values())
+    data, stab_desc = stable_split(data_sessions)
+    print(f"4 键样本: 全量 {n_all} → {stab_desc}")
+    print(f"段样本: {len(data)*3}")
 
-    # ── 主口径划分: 固定 trial 测试集 (2026-08-19 起统一口径; 与实验脚本同协议) ──
+    # ── 主口径划分: 稳定期内固定 trial 测试集 (2026-08-30 起稳定期口径;
+    #    此前为全量混合划分 — 两口径数字不可比, 见 README 口径历史) ──
     rng = np.random.RandomState(2024)
     idx = rng.permutation(len(data))
     nt = int(len(data) * .2)
     test_idx = set(idx[:nt])
     train_data = [d for i, d in enumerate(data) if i not in test_idx]
     test_data = [d for i, d in enumerate(data) if i in test_idx]
-    print(f"划分版本: N={len(data)} trial, 测试集 {len(test_data)} ({len(test_data)*100/len(data):.0f}%), 种子 2024")
+    print(f"划分版本: 稳定期 N={len(data)} trial, 测试集 {len(test_data)} ({len(test_data)*100/len(data):.0f}%), 种子 2024")
     print(f"训练 trial {len(train_data)} / 测试 trial {len(test_data)}")
 
     # ── 评估模型: 训练集 B4b + best-of-N (测试 trial 的段不进训练/验证, 无泄漏) ──
@@ -497,11 +547,12 @@ def main():
         print("\n研究模式: 仅训练评估。加 --full 追加部署模型训练 (全数据) + 导出当量表。")
         return
 
-    # ── 部署模型: 全数据 B4b + best-of-N (当量表条目质量优先; 评估指标以上方为准) ──
-    print(f"\n=== 部署模型 (全数据训练, {trials} trials — 导出用, 指标见上方评估模型) ===")
+    # ── 部署模型: 稳定期全量 B4b + best-of-N (当量表条目质量优先; 评估指标以上方为准;
+    #    2026-08-30 起部署池=稳定期 — 全量含练习漂移段, 会把表拉慢 ~12ms, §6.7) ──
+    print(f"\n=== 部署模型 (稳定期全量训练, {trials} trials — 导出用, 指标见上方评估模型) ===")
     dprev, da, db, dn, dph, dtgt = build_tensors(data)
     dkeep, _ = residual_filter_segments(data, dprev, da, db, dn, dph, dtgt)
-    print(f"全数据 B4b: 保留 {int(dkeep.sum())}/{len(dtgt)} 段")
+    print(f"全数据 B4b: 保留 {int(dkeep.sum())}/{len(dtgt)} 段  (稳定期全量)")
     dprev, da, db, dn, dph, dtgt = dprev[dkeep], da[dkeep], db[dkeep], dn[dkeep], dph[dkeep], dtgt[dkeep]
     dbest_va, deploy_m = float("inf"), None
     for t in range(trials):
