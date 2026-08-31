@@ -212,50 +212,81 @@ def load_data(path):
     return data
 
 def load_sessions(path):
-    """按 session 时序分组 (OrderedDict, 文件顺序=时间顺序): {session: [(code, ts), ...]}。
-    过滤规则与 load_data 相同。稳定期边界与稳定期口径划分的数据入口。"""
+    """按 session 时序分组 (文件顺序=时间顺序):
+    返回 (sess4, sess2) — sess4: {session: [(code,[b_d,c_d,d_d]), ...]} (4 键 trial);
+    sess2: {session: [(code,[b_d]), ...]} (2 键 trial, T₂ 角点数据, 08-31 起参与训练)。"""
     from collections import OrderedDict
-    out = OrderedDict()
+    out4, out2 = OrderedDict(), OrderedDict()
     with open(path, encoding="utf-8") as f:
         hdr = {h:i for i,h in enumerate(f.readline().rstrip("\n").split("\t"))}
         for line in f:
             row = line.strip().split("\t")
             if len(row)<12 or row[hdr.get("error",8)]!="0": continue
             code = row[hdr["code"]]
-            if len(code)!=4 or not all(c in LETTERS for c in code): continue
-            try:
-                bd,cd,dd = float(row[hdr["b_d"]]),float(row[hdr["c_d"]]),float(row[hdr["d_d"]])
-            except ValueError: continue
-            if bd<=0 or cd<=bd or dd<=cd: continue
-            out.setdefault(row[hdr["session"]], []).append((code,[bd,cd,dd]))
-    return out
+            if not all(c in LETTERS for c in code): continue
+            if len(code)==4:
+                try:
+                    bd,cd,dd = float(row[hdr["b_d"]]),float(row[hdr["c_d"]]),float(row[hdr["d_d"]])
+                except ValueError: continue
+                if bd<=0 or cd<=bd or dd<=cd: continue
+                out4.setdefault(row[hdr["session"]], []).append((code,[bd,cd,dd]))
+            elif len(code)==2:
+                try:
+                    bd = float(row[hdr["b_d"]])
+                except ValueError: continue
+                if bd<=0: continue
+                out2.setdefault(row[hdr["session"]], []).append((code,[bd]))
+    return out4, out2
 
-def stable_split(data_sessions, band=1.10, ref_last=5, smooth=3, min_sessions=8):
-    """练习效应稳定期边界 + 稳定期数据 (2026-08-30 口径, 用户决策)。
-    方法 (确定性, 无随机):
-      1. 每 session 正确 4 键 trial 的总时 (d_d) 中位
-      2. smooth=3 session 滚动中位平滑 (抗单 session 异常)
-      3. R = 末 ref_last 个平滑值的中位 (当前速度参考)
-      4. 自末位向前找最早的连续满足 平滑值 ≤ R×band 的 session — 其后为稳定期
-         (速度已在当前水平的 band 带内; 之前属练习漂移段, 剔除出训练/测试)
-      min_sessions: 稳定期不足此数打警告 (不阻断)
-    返回 (稳定期数据列表, 描述 str)。
-    依据: 实验 (README §6.7) — 混合分布使全量模型对近期状态偏慢 ~12ms;
-    错误率模型不受练习影响 (状态变量), 仍用全量数据 (分析-错误率规律.py)。"""
-    names = list(data_sessions.keys())
-    med = np.array([np.median([ts[2] for _, ts in data_sessions[s]]) for s in names])
+def stable_pools(path, band=1.10, ref_last=5, smooth=3, min_sessions=8):
+    """稳定期标准划分 (2026-08-31 起 2 键角点数据参与训练, 用户决策)。
+    边界方法 (确定性, 无随机; 与 08-30 版一致): 每 session **4 键** trial 总时中位
+    → smooth=3 session 滚动中位 → R=末 ref_last 平滑值中位 → 自末向前最早连续
+    满足 ≤R×band 的 session 起为稳定期 (2 键 trial 不参与边界计算, 按同 session 归属)。
+    划分: 稳定期 4 键与 2 键各自 RandomState(2024) 顺序 permutation 80/20
+    (先 4 键后 2 键, 固定顺序)。返回 dict:
+      train_all  训练池 = train4 + 角点段源 train2 (拼接顺序固定, 四入口共用保同流)
+      test4 / test2 / train4 / train2 / deploy4 / deploy2 (deploy=稳定期全量) / desc
+    依据: 角点 S(∅,a,b,∅) 原为零样本外推 (实测偏差 −6.0±0.8ms), 2 键参与训练使其
+    内插化; 模型结构共享使稀疏覆盖 (n=1) 也被整体统计强度正则化 (README §6.6)。"""
+    sess4, sess2 = load_sessions(path)
+    names = list(sess4.keys())
+    med = np.array([np.median([ts[2] for _, ts in sess4[s]]) for s in names])
     sm = np.array([np.median(med[max(0, i - smooth + 1):i + 1]) for i in range(len(med))])
     R = float(np.median(sm[-ref_last:]))
     k = len(sm)
     while k - 1 >= 0 and sm[k - 1] <= R * band:
         k -= 1
-    stable = [t for s in names[k:] for t in data_sessions[s]]
+    stable4 = [t for s in names[k:] for t in sess4[s]]
+    stable2 = [t for s in names[k:] for t in sess2.get(s, [])]
     n_st = len(sm) - k
     warn = f"  ⚠ 稳定期仅 {n_st} session (< {min_sessions}), 样本偏少" if n_st < min_sessions else ""
+    rng = np.random.RandomState(2024)
+    i4 = rng.permutation(len(stable4)); nt4 = int(len(stable4) * .2)
+    t4set = set(i4[:nt4])
+    train4 = [d for i, d in enumerate(stable4) if i not in t4set]
+    test4  = [d for i, d in enumerate(stable4) if i in t4set]
+    i2 = rng.permutation(len(stable2)); nt2 = int(len(stable2) * .2)
+    t2set = set(i2[:nt2])
+    train2 = [d for i, d in enumerate(stable2) if i not in t2set]
+    test2  = [d for i, d in enumerate(stable2) if i in t2set]
     desc = (f"稳定期: session[{k}] {names[k]} 起 ({n_st}/{len(names)} session, "
-            f"trial {len(stable)}/{sum(len(v) for v in data_sessions.values())}, "
+            f"4键 {len(stable4)}/{sum(len(v) for v in sess4.values())} + 2键 {len(stable2)} trial, "
             f"R={R:.0f}ms, 带=R×{band:.2f}){warn}")
-    return stable, desc
+    return {"train_all": train4 + train2, "train4": train4, "test4": test4,
+            "train2": train2, "test2": test2,
+            "deploy4": stable4, "deploy2": stable2, "desc": desc}
+
+def _seg_layout(data):
+    """段槽位与 trial 归属 (混合池: 4 键 trial 3 段 slot 0/1/2, 2 键 trial 单段 slot 3=角点)。
+    B4b 的段位分桶与 trial 完整性检查共用。"""
+    pos, tri = [], []
+    for ti, (code, _) in enumerate(data):
+        if len(code) == 4:
+            pos += [0, 1, 2]; tri += [ti] * 3
+        else:
+            pos += [3]; tri += [ti]
+    return np.array(pos), np.array(tri)
 
 def mad_filter_segments(data, tgt, k=3.0):
     """段级异常剔除 (MAD 自适应, 按段位置分桶; 单侧上围栏 — 异常只可能偏大):
@@ -265,19 +296,18 @@ def mad_filter_segments(data, tgt, k=3.0):
       不做硬性上下限:
         - 快段受单侧语义保护 (实测最快常规击键 15-40ms, 硬下限会误删基准键对)
         - MAD 上界 (实测 265-412ms) 已严于任何固定上限, 500ms 硬顶从不额外触发
-      返回 (keep 掩码, 三段齐全的 trial 子集)。实验对比: MAD k=3 总 MAE 89.6→73.4ms,
-      R² 0.275→0.314 (实验-剔除对比.py), 优于固定阈值 (600/2000) 与 k=2/4/5。"""
-    n = len(data)
-    pos = np.tile([0,1,2], n)
+      槽位分桶 (08-31 起): 4 键 trial 段 slot 0/1/2 + 2 键角点段 slot 3 (独立桶)。
+      返回 (keep 掩码, 段齐全的 trial 子集)。"""
+    pos, tri = _seg_layout(data)
     keep = np.ones(len(tgt), dtype=bool)
-    for p in range(3):
-        idx = np.where(pos==p)[0]
+    for p in np.unique(pos):
+        idx = np.where(pos == p)[0]
         vals = tgt[idx]
         med = np.median(vals)
         mad = np.median(np.abs(vals - med))
         sigma = 1.4826 * mad if mad > 0 else 1.0
         keep[idx] = vals < med + k * sigma
-    tri_ok = keep.reshape(-1, 3).all(axis=1)
+    tri_ok = np.array([keep[tri == t].all() for t in range(len(data))])
     data_full = [d for d, ok in zip(data, tri_ok) if ok]
     return keep, data_full
 
@@ -325,15 +355,20 @@ def residual_filter_segments(data, prev, a, b, nxt, ph, tgt, k=3.0, m0_seeds=5):
         mad = np.median(np.abs(v - med))
         sigma = 1.4826 * mad if mad > 0 else 1.0
         keep[idx] = v < med + k * sigma
-    tri_ok = keep.reshape(-1, 3).all(axis=1)
+    _, tri = _seg_layout(data)
+    tri_ok = np.array([keep[tri == t].all() for t in range(len(data))])
     data_full = [d for d, ok in zip(data, tri_ok) if ok]
     return keep, data_full
 
 def build_tensors(data):
-    """全部段样本 (每 trial 3 段): (prev, a, b, nxt, phi15, target)
-    段: S(∅,a,b,c) / S(a,b,c,d) / S(b,c,d,∅) — 与 v1 同序 (slot 0/1/2 交错)"""
+    """全部段样本: (prev, a, b, nxt, phi15, target)。
+    4 键 trial: 段 S(∅,a,b,c) / S(a,b,c,d) / S(b,c,d,∅) — slot 0/1/2 交错;
+    2 键 trial (08-31 起参与训练): 单段 S(∅,a,b,∅) = T₂ 角点"""
     segs = []
     for code, ts in data:
+        if len(code) == 2:
+            segs.append((EMPTY, code[0], code[1], EMPTY, ts[0]))
+            continue
         a,b,c,d = code
         segs.append((EMPTY, a, b, c, ts[0]))
         segs.append((a, b, c, d, ts[1]-ts[0]))
@@ -497,27 +532,22 @@ def main():
     if not DATA.exists(): print(f"无数据: {DATA}"); sys.exit(1)
 
     print(f"加载: {DATA}")
-    data_sessions = load_sessions(str(DATA))
-    n_all = sum(len(v) for v in data_sessions.values())
-    data, stab_desc = stable_split(data_sessions)
-    print(f"4 键样本: 全量 {n_all} → {stab_desc}")
-    print(f"段样本: {len(data)*3}")
+    pools = stable_pools(str(DATA))
+    data = pools["train_all"]            # 训练池 = 4 键 train + 2 键角点 train (拼接序固定)
+    train_data, test_data = pools["train4"], pools["test4"]
+    print(f"4 键样本: {pools['desc']}")
+    print(f"段样本: 训练池 {len(data)} trial → {3*pools['train4'].__len__()+pools['train2'].__len__()} 段")
 
-    # ── 主口径划分: 稳定期内固定 trial 测试集 (2026-08-30 起稳定期口径;
-    #    此前为全量混合划分 — 两口径数字不可比, 见 README 口径历史) ──
-    rng = np.random.RandomState(2024)
-    idx = rng.permutation(len(data))
-    nt = int(len(data) * .2)
-    test_idx = set(idx[:nt])
-    train_data = [d for i, d in enumerate(data) if i not in test_idx]
-    test_data = [d for i, d in enumerate(data) if i in test_idx]
-    print(f"划分版本: 稳定期 N={len(data)} trial, 测试集 {len(test_data)} ({len(test_data)*100/len(data):.0f}%), 种子 2024")
-    print(f"训练 trial {len(train_data)} / 测试 trial {len(test_data)}")
+    # ── 主口径划分: 稳定期内固定 trial 测试集 (4 键与 2 键各自 80/20, 同 RandomState(2024)
+    #    顺序划分; 2 键测试 trial 不进训练 → 角点指标非循环) ──
+    print(f"划分版本: 稳定期 4键 N={len(train_data)+len(test_data)}, 测试集 {len(test_data)} (20%), "
+          f"+ 2键角点 训练 {len(pools['train2'])} / 留出 {len(pools['test2'])}, 种子 2024")
+    print(f"训练 trial {len(train_data)}+{len(pools['train2'])} / 测试 trial {len(test_data)}+{len(pools['test2'])}")
 
-    # ── 评估模型: 训练集 B4b + best-of-N (测试 trial 的段不进训练/验证, 无泄漏) ──
-    prev, a, b, nxt, ph, tgt = build_tensors(train_data)
-    keep, _ = residual_filter_segments(train_data, prev, a, b, nxt, ph, tgt)
-    print(f"训练集 B4b 剔除 (键对分桶带符号残差, 单侧上围栏 k=3): 保留 {int(keep.sum())}/{len(tgt)} 段")
+    # ── 评估模型: 训练池 B4b (4键+2键角点) + best-of-N (测试 trial 的段不进训练/验证, 无泄漏) ──
+    prev, a, b, nxt, ph, tgt = build_tensors(data)
+    keep, _ = residual_filter_segments(data, prev, a, b, nxt, ph, tgt)
+    print(f"训练池 B4b 剔除 (键对分桶带符号残差, 单侧上围栏 k=3): 保留 {int(keep.sum())}/{len(tgt)} 段 (4键+2键角点)")
     prev, a, b, nxt, ph, tgt = prev[keep], a[keep], b[keep], nxt[keep], ph[keep], tgt[keep]
 
     model_name_full = {"bi": "双线性 de20/dh64 sym_phi", "cp": "CP rank=32"}.get(model_name, model_name)
@@ -532,27 +562,43 @@ def main():
             star = "  ← 新最优"
         print(f"  trial {t+1:2d}/{trials}: 段MAE={seg_mae:5.1f}ms  验证段MAE={va_mae:5.1f}ms{star}")
 
-    # 测试集独立 B4b (保留口径; 内部自训 M0, 与训练集剔除无信息交换)
+    # ── 主指标: 保留口径 (2026-08-26 起默认只展示保留口径, 全口径需时另行说明) ──
     tp, ta, tb, tn, tph, tt = build_tensors(test_data)
     tkeep, test_full = residual_filter_segments(test_data, tp, ta, tb, tn, tph, tt)
     print(f"测试集 B4b: 保留 {int(tkeep.sum())}/{len(tt)} 段, 完整 trial {len(test_full)}/{len(test_data)}")
-
-    # ── 主指标: 保留口径 (2026-08-26 起默认只展示保留口径, 全口径需时另行说明) ──
     seg_keep = eval_seg(best_m, tp[tkeep], ta[tkeep], tb[tkeep], tn[tkeep], tph[tkeep], tt[tkeep])
     tot_keep, r2_keep = eval_total(best_m, test_full)
     print(f"\n=== 主指标 (固定 trial 测试集 {len(test_data)}, 保留口径, 参数 {best_m.nparam()}, 验证段MAE={best_va:.1f}) ===")
     print(f"保留口径: 段MAE={seg_keep:5.1f}  总MAE={tot_keep:5.1f}  R²={r2_keep:+.3f}")
+
+    # ── T₂ 角点指标 (2 键留出 trial, 逐键对单侧 MAD 清洗后对比角点预测; 非循环) ──
+    if pools["test2"]:
+        from collections import defaultdict
+        pv = defaultdict(list)
+        for code, ts in pools["test2"]:
+            pv[(KEY_TO_IDX[code[0]], KEY_TO_IDX[code[1]])].append(ts[0])
+        B = _bigram_ms(best_m)
+        errs, diffs = [], []
+        for (i, j), v in pv.items():
+            v = np.array(v)
+            med = np.median(v); mad = np.median(np.abs(v - med))
+            sig = 1.4826 * mad if mad > 0 else 1.0
+            c = v[v < med + 3 * sig]
+            errs += list(np.abs(c - B[i, j])); diffs += list(c - B[i, j])
+        errs, diffs = np.array(errs), np.array(diffs)
+        print(f"角点指标 (T₂ 留出 n={len(errs)}): 段MAE={errs.mean():5.1f}  偏差={diffs.mean():+5.1f} (中位 {np.median(diffs):+.1f})")
 
     if not full:
         print("\n研究模式: 仅训练评估。加 --full 追加部署模型训练 (全数据) + 导出当量表。")
         return
 
     # ── 部署模型: 稳定期全量 B4b + best-of-N (当量表条目质量优先; 评估指标以上方为准;
-    #    2026-08-30 起部署池=稳定期 — 全量含练习漂移段, 会把表拉慢 ~12ms, §6.7) ──
+    #    2026-08-30 起部署池=稳定期, 08-31 起含 2 键角点全量 — 角点条目内插化) ──
     print(f"\n=== 部署模型 (稳定期全量训练, {trials} trials — 导出用, 指标见上方评估模型) ===")
-    dprev, da, db, dn, dph, dtgt = build_tensors(data)
-    dkeep, _ = residual_filter_segments(data, dprev, da, db, dn, dph, dtgt)
-    print(f"全数据 B4b: 保留 {int(dkeep.sum())}/{len(dtgt)} 段  (稳定期全量)")
+    deploy_all = pools["deploy4"] + pools["deploy2"]
+    dprev, da, db, dn, dph, dtgt = build_tensors(deploy_all)
+    dkeep, _ = residual_filter_segments(deploy_all, dprev, da, db, dn, dph, dtgt)
+    print(f"全数据 B4b: 保留 {int(dkeep.sum())}/{len(dtgt)} 段  (稳定期全量, 4键+2键角点)")
     dprev, da, db, dn, dph, dtgt = dprev[dkeep], da[dkeep], db[dkeep], dn[dkeep], dph[dkeep], dtgt[dkeep]
     dbest_va, deploy_m = float("inf"), None
     for t in range(trials):

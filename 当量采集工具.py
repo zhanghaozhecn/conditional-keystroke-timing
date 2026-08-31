@@ -23,8 +23,8 @@ import tkinter as tk
 
 OUT = Path("D:/OneDrive/typing/击键测速/击键测速数据.tsv")
 LETTERS = 'abcdefghijklmnopqrstuvwxyz;,./'  # 30 键 (3 行 10 列完整 QWERTY)
-P2 = 0.50  # 2 键试次概率 (加权混入)。08-30 起 0.5 (角点验证冲刺: ~215 2键/session,
-           # ~7-8 session 补齐 n>=3 全覆盖); 角点校准完成后可回调 0.2-0.3 维持覆盖
+P2 = 0.30  # 2 键试次概率 (加权混入)。08-31 起回调 0.3 维持角点覆盖
+           # (角点已参与训练, 冲刺结束; 2 键数据随采集持续增密角点条目)
 
 HEADER = [
     "code",           # 显示的编码 (4 键 trial; 08-29 起混入 2 键)
