@@ -1,18 +1,21 @@
 #!/usr/bin/env python3
 """
-条件击键当量模型（对称段模型 v2, sym_phi）
+条件击键当量模型（v3 混合部署模型）
   研究阶段（默认）: 训练段模型 + 报告总时间 MAE/R²
   完成阶段 --full: 追加导出部署模型 (全数据) 与 4-D 段当量母表 (npz)
 
-段定义: t = S(p,a,b,n) — 前两键 p,a + 当前键对 a,b + **后继键 n** (2026-08-29 落地,
+段定义: t = S(p,a,b,n) — 前两键 p,a + 当前键对 a,b + **后继键 n** (v2, 2026-08-29,
 实验-后键条件系列 → README §6.6)。n=∅(索引 30) 表无后继 (词末"甩出")。
-架构: 双线性交互(e_p,e_a,e_b) 3 项 + MLP([e_p;e_a;e_b;φ15])
+神经分量: 双线性交互(e_p,e_a,e_b) 3 项 + MLP([e_p;e_a;e_b;φ15]) 75→64→32→1 (deep2,
+  v3 加深 — v1"单层最优"为混合数据伪收敛, README §6.10)
   φ15 = φ8(a,b) 几何 + φsuc7 后键特征 [存在, 同手(b,n), 同指(b,n), 同键(b,n),
   Fitts(b,n), 同手(a,n), Fitts(a,n)]; n=∅ 时 φsuc 全 0 (存在位=0)。
-  sym_phi 形式: n 仅经手工特征进入 (实验证明几何身份≈嵌入身份, 5 双线性无增益),
-  无未训练嵌入角点问题; 模型结构相对 v1 仅 MLP 输入 68→75 (+448 参数)。
+部署形态 (v3, 2026-09-02, 用户确认采纳): BlendModel = 0.3×XGBoost(独热124+φ15)
+  + 0.7×(deep2 × 固定种子 0-4 平均) — 无 best-of 选优 → 无选优抽签噪声 (决策带
+  从 ±3 缩至仅测试重洗 ~±1ms); 依据 实验-架构对比/架构对比2 (README §6.10):
+  42.2-42.5ms / R²+0.60 / 段 26.2 (达实测噪声底) / 角点 15.5。
 
-查询公式 (词内语义, 全部查询点有训练分布覆盖, T₂ 角点 (p=∅,n=∅) 除外—2 键试次验证中):
+查询公式 (词内语义, 全部查询点有训练分布覆盖, T₂ 角点由 2 键试次内插):
   两键当量  T₂(ab)   = S(∅,a,b,∅)
   三键当量  T₃(abc)  = S(∅,a,b,c) + S(a,b,c,∅)
   四键当量  T₄(abcd) = S(∅,a,b,c) + S(a,b,c,d) + S(b,c,d,∅)
@@ -20,6 +23,7 @@
 键位嵌入: e_k = E[k] ∈ ℝ²⁰ (30 键各独立, 索引 30 = ∅ 前键/后键)
 导出: 当量-段表.npz — F[p,a,b,n] 形状 (31,30,30,31), p/n 维 0-29=键、30=∅,
   附 letters/empty/version 元数据; 组装当量表.py / 组装-chai当量表.py 查表组合。
+  模型: keystroke_model.pt (deep2×5 权重) + 击键模型-xgb.json (XGB 分量)。
 """
 import argparse, sys, numpy as np, torch, torch.nn as nn, torch.nn.functional as F
 from pathlib import Path
@@ -141,19 +145,21 @@ class _SegModel(nn.Module):
     def load(self, path): self.load_state_dict(torch.load(path, weights_only=True))
 
 class KeystrokeModel(_SegModel):
-    """对称段模型 (sym_phi): 键位嵌入 (20 维) + φ15 + 双线性交互 3 项 + MLP 头。
-    v1 → v2 (2026-08-29): 增后键条件 — MLP 输入 68→75 (+448 参数), 结构其余不变;
-    依据 实验-后键条件系列 (README §6.6): 对称化总MAE −1.3~−1.6 (两组独立 best-of-10
-    方向一致), 分解 = 存在位(段位通道) −0.4~−1.0 + 后键几何身份 −1.0;
-    n 仅经 φsuc 特征进入 (几何身份≈嵌入身份, 5 双线性无增益)。
-    v1 依据 (实验-双线性扩容.py 等): de20/dh64 单层最优; relu 最优; RMSNorm 微增益;
-    W3 跨键双线性 +2.1ms (最值钱组件); 结构已收敛 (残差/固有噪声 = 0.91)。"""
+    """对称段模型 (sym_phi deep2): 键位嵌入 (20 维) + φ15 + 双线性交互 3 项 + 深化 MLP 头。
+    v3 (2026-09-02): MLP 64→32→1 两隐藏层 (deep2), 依据 实验-架构对比.py 稳定期重审 —
+    加一层对 base 10/10 配对 −2.2~−2.5ms, v1"单层最优"为混合数据伪收敛 (README §6.10)。
+    部署形态 = BlendModel (本类×5 固定种子平均 + XGB 0.3 混合, 见下方混合段)。
+    v2 (2026-08-29): 增后键条件 — n 仅经 φsuc 特征进入 (几何身份≈嵌入身份);
+    依据 实验-后键条件系列 (README §6.6): 对称化总MAE −1.3~−1.6。
+    v1 依据 (实验-双线性扩容.py 等): de20 单层最优; relu 最优; RMSNorm 微增益;
+    W3 跨键双线性 +2.1ms。"""
     def __init__(self, d_embed=20, d_hidden=64):
         super().__init__()
         self.E_key = nn.Embedding(len(LETTERS) + 1, d_embed)  # 30 键 + ∅
         self.W = nn.Parameter(torch.randn(3, d_embed, d_embed) * 0.05)  # (p,a),(a,b),(p,b)
         self.mlp = nn.Sequential(nn.Linear(d_embed*3+15, d_hidden), nn.ReLU(),
-                                 RMSNorm(d_hidden), nn.Linear(d_hidden, 1))
+                                 RMSNorm(d_hidden), nn.Linear(d_hidden, d_hidden//2),
+                                 nn.ReLU(), nn.Linear(d_hidden//2, 1))
     @property
     def _dev(self): return next(self.mlp.parameters()).device
     def _batch(self, ids, ph):
@@ -170,8 +176,8 @@ class KeystrokeModel(_SegModel):
 
 class CPModel(_SegModel):
     """CP 张量分解: S(p,a,b,n) ≈ Σ_r U(p)·V(a)·W(b) + MLP 头 (e_n+φ15 并入头)。
-    备选架构 (--model cp): v1 对比验证集 R² 0.395 vs CP 0.343 被反超 (实验-双线性
-    扩容.py, 5 seed); 保留作对照。v2 对称化: 后键经 e_n 并入 MLP 头 (对照口径)。"""
+    备选架构 (历史对照): v1 验证集 R² 0.395 vs CP 0.343; 稳定期重审 50.6 vs 47.5
+    (实验-架构对比.py, README §6.10) 两时代皆差, 维持废弃。"""
     def __init__(self, rank=32, d_embed=12, d_hidden=24):
         super().__init__()
         self.U = nn.Embedding(len(LETTERS)+1, rank)   # 前键因子
@@ -189,6 +195,84 @@ class CPModel(_SegModel):
         e = self.E_key(ids)
         mlp = self.mlp(torch.cat([e.reshape(B, -1), ph.to(self._dev).reshape(B, -1)], dim=1)).squeeze(-1)
         return cp + mlp
+
+# ═══════════════════ 混合部署模型 (v3, 2026-09-02) ═══════════════════
+
+W_XGB = 0.3   # 混合权重: 0.3×XGB + 0.7×(deep2 五种子平均) — 实验-架构对比2.py 双批定标
+XGB_PARAMS = dict(n_estimators=500, learning_rate=0.06, max_depth=6,
+                  subsample=0.8, colsample_bytree=0.8, tree_method="hist",
+                  random_state=0, n_jobs=-1, verbosity=0)
+
+def design_matrix(prev, a, b, nxt, ph):
+    """XGB 设计矩阵: 独热(p,a,b,n 各31列) 124 + φ15 = 139 维"""
+    n = len(prev)
+    oh = np.zeros((n, 4 * 31), dtype=np.float32)
+    for j, arr in enumerate((prev, a, b, nxt)):
+        oh[np.arange(n), np.asarray(arr) + j * 31] = 1.0
+    return np.concatenate([oh, np.asarray(ph).reshape(n, -1).astype(np.float32)], axis=1)
+
+def train_xgb(prev, a, b, nxt, ph, tgt):
+    """XGB 分量 (确定性, 种子稳定 ±0.18ms — README §6.10)"""
+    from xgboost import XGBRegressor
+    X = design_matrix(prev, a, b, nxt, ph)
+    return XGBRegressor(**XGB_PARAMS).fit(X, tgt)
+
+class BlendModel:
+    """v3 混合部署模型: W×XGB + (1-W)×(KeystrokeModel deep2 × 固定 5 种子平均)。
+    无 best-of 选优 (固定种子 0-4 全体平均) → 无选优抽签噪声, 同数据逐位确定。
+    依据 实验-架构对比2.py (README §6.10): 42.2-42.5ms / R²+0.60 / 段 26.2 (噪声底),
+    对 deep2ens5 单独 −0.5ms, 对 v2 base best-of-10 (45.3 口径) 约 −3ms。
+    接口与 _SegModel 鸭子类型兼容 (seg/total/_batch/nparam)。"""
+    SEEDS = (0, 1, 2, 3, 4)
+    def __init__(self, xgb_fit, members):
+        self.xgb, self.members = xgb_fit, members
+    @classmethod
+    def fit(cls, prev, a, b, nxt, ph, tgt):
+        xgb_fit = train_xgb(prev, a, b, nxt, ph, tgt)
+        members = []
+        for s in cls.SEEDS:
+            m = KeystrokeModel()
+            train(m, prev, a, b, nxt, ph, tgt, seed=s)
+            members.append(m)
+        return cls(xgb_fit, members)
+    def _batch(self, ids, ph):
+        """ids: torch (B,4) [p,a,b,n]; 返回 torch 张量 (调用方 .numpy())"""
+        ids_np = ids.numpy() if isinstance(ids, torch.Tensor) else np.asarray(ids)
+        ph_np = ph.numpy() if isinstance(ph, torch.Tensor) else np.asarray(ph)
+        with torch.no_grad():
+            d = torch.stack([m._batch(ids, ph) for m in self.members]).mean(0)
+        x = torch.from_numpy(self.xgb.predict(design_matrix(
+            ids_np[:, 0], ids_np[:, 1], ids_np[:, 2], ids_np[:, 3], ph_np)).astype(np.float32))
+        return W_XGB * x + (1 - W_XGB) * d
+    # ── 单查询接口 (与 _SegModel 同形) ──
+    def seg(self, prev, a, b, nxt=None):
+        ids = torch.tensor([[EMPTY if prev is None else KEY_TO_IDX[prev],
+                             KEY_TO_IDX[a], KEY_TO_IDX[b],
+                             EMPTY if nxt is None else KEY_TO_IDX[nxt]]])
+        ph = torch.tensor([np.concatenate([PHI[(a, b)], phi_suc(
+            [KEY_TO_IDX[a]], [KEY_TO_IDX[b]],
+            [EMPTY if nxt is None else KEY_TO_IDX[nxt]])[0]])], dtype=torch.float32)
+        return self._batch(ids, ph).item()
+    def total(self, code):
+        a, b, c, d = code
+        return self.seg(None, a, b, c) + self.seg(a, b, c, d) + self.seg(b, c, d)
+    def nparam(self): return sum(m.nparam() for m in self.members)
+    def eval(self): return self   # 兼容 eval_seg 的 model.eval() (成员常驻 eval 态)
+    def save(self, path_pt, path_xgb):
+        torch.save({"seeds": list(self.SEEDS),
+                    "members": [m.state_dict() for m in self.members]}, path_pt)
+        self.xgb.get_booster().save_model(path_xgb)
+    @classmethod
+    def load(cls, path_pt, path_xgb):
+        import xgboost as xgb
+        ck = torch.load(path_pt, weights_only=True)
+        members = []
+        for sd in ck["members"]:
+            m = KeystrokeModel(); m.load_state_dict(sd); m.eval(); members.append(m)
+        bst = xgb.Booster(); bst.load_model(path_xgb)
+        class _BstWrap:   # 与 sklearn 拟合对象同形 (predict(ndarray))
+            def predict(self, X): return bst.inplace_predict(np.ascontiguousarray(X, dtype=np.float32))
+        return cls(_BstWrap(), members)
 
 # ═══════════════════ 数据 ═══════════════════
 
@@ -519,14 +603,11 @@ def export_seg_table(model, out_path):
 # ═══════════════════ 主流程 ═══════════════════
 
 def main():
-    ap = argparse.ArgumentParser(description="对称击键当量模型: 训练 + 测试集评估 + 可选导出")
+    ap = argparse.ArgumentParser(description="对称击键当量模型 v3 混合: 训练 + 测试集评估 + 可选导出")
     ap.add_argument("--full", action="store_true",
                     help="追加部署模型训练 (全数据) + 导出 4-D 段当量表 (npz) 与模型")
-    ap.add_argument("--model", choices=["bi", "cp"], default="bi",
-                    help="bi=双线性 de20/dh64 sym_phi (默认) | cp=CP 张量分解 rank=32")
-    ap.add_argument("--trials", type=int, default=10, help="best-of-N 训练次数")
     args = ap.parse_args()
-    full, model_name, trials = args.full, args.model, args.trials
+    full = args.full
     PROJ = Path(__file__).resolve().parent
     DATA = PROJ / "击键测速数据.tsv"
     if not DATA.exists(): print(f"无数据: {DATA}"); sys.exit(1)
@@ -544,31 +625,29 @@ def main():
           f"+ 2键角点 训练 {len(pools['train2'])} / 留出 {len(pools['test2'])}, 种子 2024")
     print(f"训练 trial {len(train_data)}+{len(pools['train2'])} / 测试 trial {len(test_data)}+{len(pools['test2'])}")
 
-    # ── 评估模型: 训练池 B4b (4键+2键角点) + best-of-N (测试 trial 的段不进训练/验证, 无泄漏) ──
+    # ── 评估模型: 训练池 B4b (4键+2键角点) + v3 混合 (XGB 0.3 + deep2×5 固定种子平均;
+    #    无 best-of 选优 → 无选优抽签噪声; 测试 trial 的段不进训练, 无泄漏) ──
     prev, a, b, nxt, ph, tgt = build_tensors(data)
     keep, _ = residual_filter_segments(data, prev, a, b, nxt, ph, tgt)
     print(f"训练池 B4b 剔除 (键对分桶带符号残差, 单侧上围栏 k=3): 保留 {int(keep.sum())}/{len(tgt)} 段 (4键+2键角点)")
     prev, a, b, nxt, ph, tgt = prev[keep], a[keep], b[keep], nxt[keep], ph[keep], tgt[keep]
 
-    model_name_full = {"bi": "双线性 de20/dh64 sym_phi", "cp": "CP rank=32"}.get(model_name, model_name)
-    print(f"\n=== 评估模型训练 ({model_name_full}, best-of-{trials}, 验证集选优) ===")
-    best_va, best_m = float("inf"), None
-    for t in range(trials):
-        m = CPModel() if model_name == "cp" else KeystrokeModel()
-        seg_mae, va_mae = train(m, prev, a, b, nxt, ph, tgt, seed=t)
-        star = ""
-        if va_mae < best_va:
-            best_va, best_m = va_mae, m
-            star = "  ← 新最优"
-        print(f"  trial {t+1:2d}/{trials}: 段MAE={seg_mae:5.1f}ms  验证段MAE={va_mae:5.1f}ms{star}")
+    print(f"\n=== 评估模型训练 (v3 混合: XGB {W_XGB} + deep2×{len(BlendModel.SEEDS)} 固定种子平均) ===")
+    members = []
+    for s in BlendModel.SEEDS:
+        m = KeystrokeModel()
+        seg_mae, va_mae = train(m, prev, a, b, nxt, ph, tgt, seed=s)
+        print(f"  seed {s}: 段MAE={seg_mae:5.1f}ms  验证段MAE={va_mae:5.1f}ms")
+        members.append(m)
+    blend_m = BlendModel(train_xgb(prev, a, b, nxt, ph, tgt), members)
 
     # ── 主指标: 保留口径 (2026-08-26 起默认只展示保留口径, 全口径需时另行说明) ──
     tp, ta, tb, tn, tph, tt = build_tensors(test_data)
     tkeep, test_full = residual_filter_segments(test_data, tp, ta, tb, tn, tph, tt)
     print(f"测试集 B4b: 保留 {int(tkeep.sum())}/{len(tt)} 段, 完整 trial {len(test_full)}/{len(test_data)}")
-    seg_keep = eval_seg(best_m, tp[tkeep], ta[tkeep], tb[tkeep], tn[tkeep], tph[tkeep], tt[tkeep])
-    tot_keep, r2_keep = eval_total(best_m, test_full)
-    print(f"\n=== 主指标 (固定 trial 测试集 {len(test_data)}, 保留口径, 参数 {best_m.nparam()}, 验证段MAE={best_va:.1f}) ===")
+    seg_keep = eval_seg(blend_m, tp[tkeep], ta[tkeep], tb[tkeep], tn[tkeep], tph[tkeep], tt[tkeep])
+    tot_keep, r2_keep = eval_total(blend_m, test_full)
+    print(f"\n=== 主指标 (固定 trial 测试集 {len(test_data)}, 保留口径, v3 混合 {blend_m.nparam()} 参数×5+XGB) ===")
     print(f"保留口径: 段MAE={seg_keep:5.1f}  总MAE={tot_keep:5.1f}  R²={r2_keep:+.3f}")
 
     # ── T₂ 角点指标 (2 键留出 trial, 逐键对单侧 MAD 清洗后对比角点预测; 非循环) ──
@@ -577,7 +656,7 @@ def main():
         pv = defaultdict(list)
         for code, ts in pools["test2"]:
             pv[(KEY_TO_IDX[code[0]], KEY_TO_IDX[code[1]])].append(ts[0])
-        B = _bigram_ms(best_m)
+        B = _bigram_ms(blend_m)
         errs, diffs = [], []
         for (i, j), v in pv.items():
             v = np.array(v)
@@ -592,27 +671,26 @@ def main():
         print("\n研究模式: 仅训练评估。加 --full 追加部署模型训练 (全数据) + 导出当量表。")
         return
 
-    # ── 部署模型: 稳定期全量 B4b + best-of-N (当量表条目质量优先; 评估指标以上方为准;
-    #    2026-08-30 起部署池=稳定期, 08-31 起含 2 键角点全量 — 角点条目内插化) ──
-    print(f"\n=== 部署模型 (稳定期全量训练, {trials} trials — 导出用, 指标见上方评估模型) ===")
+    # ── 部署模型: 稳定期全量 B4b + v3 混合 (当量表条目质量优先; 评估指标以上方为准;
+    #    2026-08-30 起部署池=稳定期, 08-31 起含 2 键角点全量 — 角点条目内插化;
+    #    2026-09-02 起部署形态=XGB+deep2×5 混合, 固定种子无选优) ──
+    print(f"\n=== 部署模型 (稳定期全量训练, v3 混合 — 导出用, 指标见上方评估模型) ===")
     deploy_all = pools["deploy4"] + pools["deploy2"]
     dprev, da, db, dn, dph, dtgt = build_tensors(deploy_all)
     dkeep, _ = residual_filter_segments(deploy_all, dprev, da, db, dn, dph, dtgt)
     print(f"全数据 B4b: 保留 {int(dkeep.sum())}/{len(dtgt)} 段  (稳定期全量, 4键+2键角点)")
     dprev, da, db, dn, dph, dtgt = dprev[dkeep], da[dkeep], db[dkeep], dn[dkeep], dph[dkeep], dtgt[dkeep]
-    dbest_va, deploy_m = float("inf"), None
-    for t in range(trials):
-        m = CPModel() if model_name == "cp" else KeystrokeModel()
-        seg_mae, va_mae = train(m, dprev, da, db, dn, dph, dtgt, seed=t)
-        star = ""
-        if va_mae < dbest_va:
-            dbest_va, deploy_m = va_mae, m
-            star = "  ← 新最优"
-        print(f"  trial {t+1:2d}/{trials}: 段MAE={seg_mae:5.1f}ms  验证段MAE={va_mae:5.1f}ms{star}")
+    dmembers = []
+    for s in BlendModel.SEEDS:
+        m = KeystrokeModel()
+        seg_mae, va_mae = train(m, dprev, da, db, dn, dph, dtgt, seed=s)
+        print(f"  seed {s}: 段MAE={seg_mae:5.1f}ms  验证段MAE={va_mae:5.1f}ms")
+        dmembers.append(m)
+    deploy_m = BlendModel(train_xgb(dprev, da, db, dn, dph, dtgt), dmembers)
 
     print("\n=== 导出 ===")
-    deploy_m.save(str(PROJ/"keystroke_model.pt"))
-    print(f"  模型 → {PROJ/'keystroke_model.pt'}  (v2 对称段模型, 与 v1 权重不兼容)")
+    deploy_m.save(str(PROJ/"keystroke_model.pt"), str(PROJ/"击键模型-xgb.json"))
+    print(f"  模型 → keystroke_model.pt (deep2×5 权重) + 击键模型-xgb.json (XGB 分量; 与 v2 权重不兼容)")
     export_seg_table(deploy_m, str(PROJ/"当量-段表.npz"))
 
 
