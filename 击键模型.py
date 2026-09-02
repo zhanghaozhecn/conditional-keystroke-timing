@@ -6,8 +6,9 @@
 
 段定义: t = S(p,a,b,n) — 前两键 p,a + 当前键对 a,b + **后继键 n** (v2, 2026-08-29,
 实验-后键条件系列 → README §6.6)。n=∅(索引 30) 表无后继 (词末"甩出")。
-神经分量: 双线性交互(e_p,e_a,e_b) 3 项 + MLP([e_p;e_a;e_b;φ15]) 75→64→32→1 (deep2,
-  v3 加深 — v1"单层最优"为混合数据伪收敛, README §6.10)
+神经分量: 双线性交互(e_p,e_a,e_b) 3 项 + MLP([e_p;e_a;e_b;φ15]) 75→128→64→1 + Dropout0.2
+  (v3.1, 2026-09-02 采纳 d20w128: deep2 加深(v3)再放宽+Dropout — 部署级 blend 总 −0.96,
+  dropout 使 5 成员去相关、集成收益放大, 实验-MLP调参.py → README §6.10 第四轮)
   φ15 = φ8(a,b) 几何 + φsuc7 后键特征 [存在, 同手(b,n), 同指(b,n), 同键(b,n),
   Fitts(b,n), 同手(a,n), Fitts(a,n)]; n=∅ 时 φsuc 全 0 (存在位=0)。
 部署形态 (v3, 2026-09-02, 用户确认采纳): BlendModel = 0.3×XGBoost(独热124+φ15)
@@ -153,13 +154,16 @@ class KeystrokeModel(_SegModel):
     依据 实验-后键条件系列 (README §6.6): 对称化总MAE −1.3~−1.6。
     v1 依据 (实验-双线性扩容.py 等): de20 单层最优; relu 最优; RMSNorm 微增益;
     W3 跨键双线性 +2.1ms。"""
-    def __init__(self, d_embed=20, d_hidden=64):
+    def __init__(self, d_embed=20, d_hidden=128, p_drop=0.2):
         super().__init__()
         self.E_key = nn.Embedding(len(LETTERS) + 1, d_embed)  # 30 键 + ∅
         self.W = nn.Parameter(torch.randn(3, d_embed, d_embed) * 0.05)  # (p,a),(a,b),(p,b)
+        # v3.1 d20w128: d_hidden 64→128 + Dropout 0.2 (实验-MLP调参.py 部署级 blend
+        # 总 −0.96; dropout 成员去相关 → 种子平均收益放大)
         self.mlp = nn.Sequential(nn.Linear(d_embed*3+15, d_hidden), nn.ReLU(),
-                                 RMSNorm(d_hidden), nn.Linear(d_hidden, d_hidden//2),
-                                 nn.ReLU(), nn.Linear(d_hidden//2, 1))
+                                 RMSNorm(d_hidden), nn.Dropout(p_drop),
+                                 nn.Linear(d_hidden, d_hidden//2), nn.ReLU(),
+                                 nn.Dropout(p_drop), nn.Linear(d_hidden//2, 1))
     @property
     def _dev(self): return next(self.mlp.parameters()).device
     def _batch(self, ids, ph):
