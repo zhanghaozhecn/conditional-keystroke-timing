@@ -5,15 +5,15 @@
   完成阶段 --full: 追加导出部署模型 (全数据) 与 4-D 段当量母表 (npz)
 
 段定义: t = S(p,a,b,n) — 前两键 p,a + 当前键对 a,b + **后继键 n** (v2, 2026-08-29,
-实验-后键条件系列 → README §6.6)。n=∅(索引 30) 表无后继 (词末"甩出")。
+实验-后键条件系列 → README 附录 A.4)。n=∅(索引 30) 表无后继 (词末"甩出")。
 神经分量: 双线性交互(e_p,e_a,e_b) 3 项 + MLP([e_p;e_a;e_b;φ15]) 75→128→64→1 + Dropout0.2
   (v3.1, 2026-09-02 采纳 d20w128: deep2 加深(v3)再放宽+Dropout — 部署级 blend 总 −0.96,
-  dropout 使 5 成员去相关、集成收益放大, 实验-MLP调参.py → README §6.10 第四轮)
+  dropout 使 5 成员去相关、集成收益放大, 实验-MLP调参.py → README 附录 A.8 第四轮)
   φ15 = φ8(a,b) 几何 + φsuc7 后键特征 [存在, 同手(b,n), 同指(b,n), 同键(b,n),
   Fitts(b,n), 同手(a,n), Fitts(a,n)]; n=∅ 时 φsuc 全 0 (存在位=0)。
 部署形态 (v3, 2026-09-02, 用户确认采纳): BlendModel = 0.3×XGBoost(独热124+φ15)
   + 0.7×(deep2 × 固定种子 0-4 平均) — 无 best-of 选优 → 无选优抽签噪声 (决策带
-  从 ±3 缩至仅测试重洗 ~±1ms); 依据 实验-架构对比/架构对比2 (README §6.10):
+  从 ±3 缩至仅测试重洗 ~±1ms); 依据 实验-架构对比/架构对比2 (README 附录 A.8):
   42.2-42.5ms / R²+0.60 / 段 26.2 (达实测噪声底) / 角点 15.5。
 
 查询公式 (词内语义, 全部查询点有训练分布覆盖, T₂ 角点由 2 键试次内插):
@@ -67,7 +67,7 @@ def _precompute_phi():
     - 逐特征 LOO 全部持平 (实验-特征消融.py, 2026-08-11, Δ<0.2ms) — φ 特征间互为冗余
     - 整体删除 +1.7ms (实验-结构消融.py, 2026-08-14, 无泄漏 trial 测试口径) — φ 作为整体
       提供嵌入补不上的几何先验, 价值在稀疏三元组外推 (2/3 段表条目零样本); LOO 在
-      训练分布内做所以测不出。保留 φ 有实证支撑 (见 README §6.4)"""
+      训练分布内做所以测不出。保留 φ 有实证支撑 (见 README 附录 A.2)"""
     feats = {}
     for a in LETTERS:
         ca,ra = LETTER_TO_COL[a], LETTER_TO_ROW[a]
@@ -148,10 +148,10 @@ class _SegModel(nn.Module):
 class KeystrokeModel(_SegModel):
     """对称段模型 (sym_phi deep2): 键位嵌入 (20 维) + φ15 + 双线性交互 3 项 + 深化 MLP 头。
     v3 (2026-09-02): MLP 64→32→1 两隐藏层 (deep2), 依据 实验-架构对比.py 稳定期重审 —
-    加一层对 base 10/10 配对 −2.2~−2.5ms, v1"单层最优"为混合数据伪收敛 (README §6.10)。
+    加一层对 base 10/10 配对 −2.2~−2.5ms, v1"单层最优"为混合数据伪收敛 (README 附录 A.8)。
     部署形态 = BlendModel (本类×5 固定种子平均 + XGB 0.3 混合, 见下方混合段)。
     v2 (2026-08-29): 增后键条件 — n 仅经 φsuc 特征进入 (几何身份≈嵌入身份);
-    依据 实验-后键条件系列 (README §6.6): 对称化总MAE −1.3~−1.6。
+    依据 实验-后键条件系列 (README 附录 A.4): 对称化总MAE −1.3~−1.6。
     v1 依据 (实验-双线性扩容.py 等): de20 单层最优; relu 最优; RMSNorm 微增益;
     W3 跨键双线性 +2.1ms。"""
     def __init__(self, d_embed=20, d_hidden=128, p_drop=0.2):
@@ -181,7 +181,7 @@ class KeystrokeModel(_SegModel):
 class CPModel(_SegModel):
     """CP 张量分解: S(p,a,b,n) ≈ Σ_r U(p)·V(a)·W(b) + MLP 头 (e_n+φ15 并入头)。
     备选架构 (历史对照): v1 验证集 R² 0.395 vs CP 0.343; 稳定期重审 50.6 vs 47.5
-    (实验-架构对比.py, README §6.10) 两时代皆差, 维持废弃。"""
+    (实验-架构对比.py, README 附录 A.8) 两时代皆差, 维持废弃。"""
     def __init__(self, rank=32, d_embed=12, d_hidden=24):
         super().__init__()
         self.U = nn.Embedding(len(LETTERS)+1, rank)   # 前键因子
@@ -216,7 +216,7 @@ def design_matrix(prev, a, b, nxt, ph):
     return np.concatenate([oh, np.asarray(ph).reshape(n, -1).astype(np.float32)], axis=1)
 
 def train_xgb(prev, a, b, nxt, ph, tgt):
-    """XGB 分量 (确定性, 种子稳定 ±0.18ms — README §6.10)"""
+    """XGB 分量 (确定性, 种子稳定 ±0.18ms — README 附录 A.8)"""
     from xgboost import XGBRegressor
     X = design_matrix(prev, a, b, nxt, ph)
     return XGBRegressor(**XGB_PARAMS).fit(X, tgt)
@@ -224,7 +224,7 @@ def train_xgb(prev, a, b, nxt, ph, tgt):
 class BlendModel:
     """v3 混合部署模型: W×XGB + (1-W)×(KeystrokeModel deep2 × 固定 5 种子平均)。
     无 best-of 选优 (固定种子 0-4 全体平均) → 无选优抽签噪声, 同数据逐位确定。
-    依据 实验-架构对比2.py (README §6.10): 42.2-42.5ms / R²+0.60 / 段 26.2 (噪声底),
+    依据 实验-架构对比2.py (README 附录 A.8): 42.2-42.5ms / R²+0.60 / 段 26.2 (噪声底),
     对 deep2ens5 单独 −0.5ms, 对 v2 base best-of-10 (45.3 口径) 约 −3ms。
     接口与 _SegModel 鸭子类型兼容 (seg/total/_batch/nparam)。"""
     SEEDS = (0, 1, 2, 3, 4)
@@ -336,7 +336,7 @@ def stable_pools(path, band=1.10, ref_last=5, smooth=3, min_sessions=8):
       train_all  训练池 = train4 + 角点段源 train2 (拼接顺序固定, 四入口共用保同流)
       test4 / test2 / train4 / train2 / deploy4 / deploy2 (deploy=稳定期全量) / desc
     依据: 角点 S(∅,a,b,∅) 原为零样本外推 (实测偏差 −6.0±0.8ms), 2 键参与训练使其
-    内插化; 模型结构共享使稀疏覆盖 (n=1) 也被整体统计强度正则化 (README §6.6)。"""
+    内插化; 模型结构共享使稀疏覆盖 (n=1) 也被整体统计强度正则化 (README 附录 A.4)。"""
     sess4, sess2 = load_sessions(path)
     names = list(sess4.keys())
     med = np.array([np.median([ts[2] for _, ts in sess4[s]]) for s in names])
@@ -579,7 +579,7 @@ def build_seg_table(model):
 
 def _bigram_ms(model):
     """T₂ 角点 B[a,b] = S(∅,a,b,∅) ms (词末两键, 未归一化), 形状 (30,30)。
-    角点 (p=∅,n=∅) 无训练样本 — 特征空间内插, 2 键试次验证中 (README §6.6)"""
+    角点 (p=∅,n=∅) 无训练样本 — 特征空间内插, 2 键试次验证中 (README 附录 A.4)"""
     n = len(LETTERS)
     ids = torch.tensor([[EMPTY, a, b, EMPTY] for a in range(n) for b in range(n)])
     ph8 = np.array([PHI[(LETTERS[a], LETTERS[b])] for a in range(n) for b in range(n)], dtype=np.float32)
