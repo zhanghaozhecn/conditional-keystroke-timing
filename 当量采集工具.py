@@ -21,7 +21,7 @@ from collections import defaultdict
 from pathlib import Path
 import tkinter as tk
 
-OUT = Path("D:/OneDrive/typing/击键测速/击键测速数据.tsv")
+OUT = Path(__file__).resolve().parent / "数据" / "击键测速数据.tsv"  # 2026-09-05 目录重组 + 去本机绝对路径
 LETTERS = 'abcdefghijklmnopqrstuvwxyz;,./'  # 30 键 (3 行 10 列完整 QWERTY)
 P2 = 0.30  # 2 键试次概率 (加权混入)。08-31 起回调 0.3 维持角点覆盖
            # (角点已参与训练, 冲刺结束; 2 键数据随采集持续增密角点条目)

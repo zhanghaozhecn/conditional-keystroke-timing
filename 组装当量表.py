@@ -19,7 +19,7 @@
 from pathlib import Path
 import numpy as np
 
-PROJ = Path(__file__).resolve().parent
+PROJ = Path(__file__).resolve().parent / "产物"   # 2026-09-05 目录重组: 四件产物入 产物/
 ERR_MS = 500.0
 L = "abcdefghijklmnopqrstuvwxyz;,./"   # 30 键 (3 行 10 列完整 QWERTY)
 E = 30                                  # ∅ 索引
