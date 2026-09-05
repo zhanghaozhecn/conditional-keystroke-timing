@@ -25,7 +25,7 @@ _DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(_DIR))
 from 击键模型 import LETTERS, LETTER_TO_COL, LETTER_TO_ROW, COL_TO_FINGER, COL_TO_HAND
 
-PATH = sys.argv[1] if len(sys.argv) > 1 and not sys.argv[1].startswith("--") else str(_DIR / "击键测速数据.tsv")
+PATH = sys.argv[1] if len(sys.argv) > 1 and not sys.argv[1].startswith("--") else str(_DIR / "数据" / "击键测速数据.tsv")
 DUAL = "--dual" in sys.argv  # 双向计数: 错按键对 (目标首键,实际错键) 同记 (2026-08-10 实验)
 
 # 键位特征 (9 特征, 2026-08-08 定稿, AUC 0.635):
@@ -256,7 +256,8 @@ base900 = base0 + Xp9 @ w_raw
 sig = lambda z: 1 / (1 + np.exp(-z))
 P00, P01 = sig(base900), sig(base900 + beta)
 P10, P11 = sig(base900 + alpha), sig(base900 + alpha + beta + gamma)
-with open(_DIR / "当量-键对错误率.txt", "w", encoding="utf-8") as f:
+(_DIR / "产物").mkdir(exist_ok=True)
+with open(_DIR / "产物" / "当量-键对错误率.txt", "w", encoding="utf-8") as f:
     f.write("pair\terr_p0n0\terr_p0n1\terr_p1n0\terr_p1n1\n")
     for (a, b), v00, v01, v10, v11 in zip(pairs, P00, P01, P10, P11):
         f.write(f"{a}{b}\t{v00:.4f}\t{v01:.4f}\t{v10:.4f}\t{v11:.4f}\n")

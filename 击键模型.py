@@ -22,7 +22,7 @@
   四键当量  T₄(abcd) = S(∅,a,b,c) + S(a,b,c,d) + S(b,c,d,∅)
 
 键位嵌入: e_k = E[k] ∈ ℝ²⁰ (30 键各独立, 索引 30 = ∅ 前键/后键)
-导出: 当量-段表.npz — F[p,a,b,n] 形状 (31,30,30,31), p/n 维 0-29=键、30=∅,
+导出 (2026-09-05 起入 产物/): 当量-段表.npz — F[p,a,b,n] 形状 (31,30,30,31), p/n 维 0-29=键、30=∅,
   附 letters/empty/version 元数据; 组装当量表.py / 组装-chai当量表.py 查表组合。
   模型: keystroke_model.pt (deep2×5 权重) + 击键模型-xgb.json (XGB 分量)。
 """
@@ -65,7 +65,7 @@ def _precompute_phi():
     Fitts (MT = a + b·log2(1+D/W), W=键宽, 行距≈2 键宽); keygen (同指跨行最慢);
     Grudin 1983 (镜像手指换位). 消融两轮:
     - 逐特征 LOO 全部持平 (实验-特征消融.py, 2026-08-11, Δ<0.2ms) — φ 特征间互为冗余
-    - 整体删除 +1.7ms (实验-结构消融.py, 2026-08-14, 无泄漏 trial 测试口径) — φ 作为整体
+    - 整体删除 +1.7ms (2026-08-14, 无泄漏 trial 测试口径; 原实验-结构消融.py 已删) — φ 作为整体
       提供嵌入补不上的几何先验, 价值在稀疏三元组外推 (2/3 段表条目零样本); LOO 在
       训练分布内做所以测不出。保留 φ 有实证支撑 (见 README 附录 A.2)"""
     feats = {}
@@ -280,6 +280,17 @@ class BlendModel:
 
 # ═══════════════════ 数据 ═══════════════════
 
+# 项目相对路径常量 (2026-09-05 目录重组: 数据/产物/实验 三分; 单一规范源, 下游一律引用)
+_DIR      = Path(__file__).resolve().parent
+DATA_TSV  = _DIR / "数据" / "击键测速数据.tsv"
+ART_DIR   = _DIR / "产物"                 # 全部计算产物 (导出方负责 mkdir)
+SEG_NPZ   = ART_DIR / "当量-段表.npz"      # 原始段母表 (本文件 --full 导出)
+ERR_TXT   = ART_DIR / "当量-键对错误率.txt" # 错误率表 (分析-错误率规律.py 导出)
+CORR_NPZ  = ART_DIR / "当量-修正段表.npz"  # 修正段表 (组装当量表.py)
+T24_TXT   = ART_DIR / "当量-2-4键.txt"     # 2-4 键总当量 (组装当量表.py)
+MODEL_PT  = ART_DIR / "keystroke_model.pt"
+MODEL_XGB = ART_DIR / "击键模型-xgb.json"
+
 def load_data(path):
     """[(code, [b_d,c_d,d_d]), ...]  error=0, 仅格式/有效性校验 (异常剔除在段级)。
     2 键行 (code 长度 2, 08-29 起混采 T₂ 角点数据) 在此被 len==4 过滤 —
@@ -476,8 +487,8 @@ def train(model, prev, a, b, nxt, ph, tgt, epochs=200, seed=0, bs=256, lr=0.001,
           patience=60, loss_fn="mse"):
     """批量训练 + 早停 (80/20 随机划分), 模型原地更新, 返回 (全数据段MAE, 验证集段MAE)。
     验证集 MAE 用于 best-of-N 选优 (选最强模型必须用验证集, 全数据含训练集会偏向过拟合)。
-    loss_fn: mse (主流程) | huber50 | l1 (实验-结构消融.py 目标函数变体) — 规范实现,
-    实验-结构消融.py 的 train_v 仅转发至此 (2026-08-18 合并双胞胎实现, 防口径漂移)。
+    loss_fn: mse (主流程) | huber50 | l1 — 目标函数变体 (2026-08-18 自实验-结构消融.py
+    合并双胞胎实现, 防口径漂移; 该脚本已删, 结论存档 README 附录 A.2)。
     判据口径 (勿单侧更改): 早停/存档用验证集 MSE, best-of-N 选优用返回的验证集
     MAE — 两者错配为已知现状, 历史结论均在此口径下取得。"""
     torch.manual_seed(seed); np.random.seed(seed)
@@ -612,8 +623,7 @@ def main():
                     help="追加部署模型训练 (全数据) + 导出 4-D 段当量表 (npz) 与模型")
     args = ap.parse_args()
     full = args.full
-    PROJ = Path(__file__).resolve().parent
-    DATA = PROJ / "击键测速数据.tsv"
+    DATA = DATA_TSV
     if not DATA.exists(): print(f"无数据: {DATA}"); sys.exit(1)
 
     print(f"加载: {DATA}")
@@ -693,9 +703,10 @@ def main():
     deploy_m = BlendModel(train_xgb(dprev, da, db, dn, dph, dtgt), dmembers)
 
     print("\n=== 导出 ===")
-    deploy_m.save(str(PROJ/"keystroke_model.pt"), str(PROJ/"击键模型-xgb.json"))
-    print(f"  模型 → keystroke_model.pt (deep2×5 权重) + 击键模型-xgb.json (XGB 分量; 与 v2 权重不兼容)")
-    export_seg_table(deploy_m, str(PROJ/"当量-段表.npz"))
+    ART_DIR.mkdir(exist_ok=True)
+    deploy_m.save(str(MODEL_PT), str(MODEL_XGB))
+    print(f"  模型 → 产物/keystroke_model.pt (deep2×5 权重) + 产物/击键模型-xgb.json (XGB 分量; 与 v2 权重不兼容)")
+    export_seg_table(deploy_m, str(SEG_NPZ))
 
 
 if __name__ == "__main__":
