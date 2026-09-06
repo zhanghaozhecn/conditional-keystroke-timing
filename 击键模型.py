@@ -310,56 +310,69 @@ def load_data(path):
             data.append((code,[bd,cd,dd]))
     return data
 
-def load_sessions(path):
-    """按 session 时序分组 (文件顺序=时间顺序):
-    返回 (sess4, sess2) — sess4: {session: [(code,[b_d,c_d,d_d]), ...]} (4 键 trial);
-    sess2: {session: [(code,[b_d]), ...]} (2 键 trial, T₂ 角点数据, 08-31 起参与训练)。"""
-    from collections import OrderedDict
-    out4, out2 = OrderedDict(), OrderedDict()
+def load_trials(path):
+    """按时间序 (文件追加序 = 采集先后) 读全部 ok trial, 不按 session 分组 (2026-09-06 起
+    序号口径, 用户决策: session=进程生命周期, 行数 4~836 悬殊且开关与坐姿不对应, 仅作
+    采集端存档字段; 依据 实验/实验-序号趋势对比.py: 两种口径边界互证一致, session 内无热身
+    效应 → 边界不携带状态信息)。
+    返回 rows: [(code, times)] 文件顺序; 4 键 times=[b_d,c_d,d_d] (均自首键按下累计,
+    d_d=trial 总时), 2 键 [b_d] (T₂ 角点数据, 08-31 起参与训练)。过滤同 08-31 版。"""
+    rows = []
     with open(path, encoding="utf-8") as f:
-        hdr = {h:i for i,h in enumerate(f.readline().rstrip("\n").split("\t"))}
+        hdr = {h: i for i, h in enumerate(f.readline().rstrip("\n").split("\t"))}
         for line in f:
             row = line.strip().split("\t")
-            if len(row)<12 or row[hdr.get("error",8)]!="0": continue
+            if len(row) < 12 or row[hdr.get("error", 8)] != "0":
+                continue
             code = row[hdr["code"]]
-            if not all(c in LETTERS for c in code): continue
-            if len(code)==4:
-                try:
-                    bd,cd,dd = float(row[hdr["b_d"]]),float(row[hdr["c_d"]]),float(row[hdr["d_d"]])
-                except ValueError: continue
-                if bd<=0 or cd<=bd or dd<=cd: continue
-                out4.setdefault(row[hdr["session"]], []).append((code,[bd,cd,dd]))
-            elif len(code)==2:
-                try:
-                    bd = float(row[hdr["b_d"]])
-                except ValueError: continue
-                if bd<=0: continue
-                out2.setdefault(row[hdr["session"]], []).append((code,[bd]))
-    return out4, out2
+            if not all(c in LETTERS for c in code):
+                continue
+            try:
+                bd, cd, dd = float(row[hdr["b_d"]]), float(row[hdr["c_d"]]), float(row[hdr["d_d"]])
+            except ValueError:
+                continue
+            if len(code) == 4:
+                if bd <= 0 or cd <= bd or dd <= cd:
+                    continue
+                rows.append((code, [bd, cd, dd]))
+            elif len(code) == 2:
+                if bd <= 0:
+                    continue
+                rows.append((code, [bd]))
+    return rows
 
-def stable_pools(path, band=1.10, ref_last=5, smooth=3, min_sessions=8):
-    """稳定期标准划分 (2026-08-31 起 2 键角点数据参与训练, 用户决策)。
-    边界方法 (确定性, 无随机; 与 08-30 版一致): 每 session **4 键** trial 总时中位
-    → smooth=3 session 滚动中位 → R=末 ref_last 平滑值中位 → 自末向前最早连续
-    满足 ≤R×band 的 session 起为稳定期 (2 键 trial 不参与边界计算, 按同 session 归属)。
+def stable_pools(path, block=150, band=1.10, ref_last=5, smooth=3, min_blocks=8):
+    """稳定期标准划分 — 序号块口径 (2026-09-06 用户决策; 由 08-30/08-31 session 版平移,
+    2 键角点数据参与训练的决策不变)。
+    边界方法 (确定性, 无随机): 4 键 trial 按时间序切等大块 (block=150 ≈ session 中位规模
+    169) → 每块 trial 总时 (d_d) 中位 → smooth=3 块滚动中位 → R=末 ref_last 平滑值中位
+    → 自末向前最早连续满足 ≤R×band 的块起为稳定期。2 键 trial 不参与边界计算, 按时间序
+    自稳定起点 trial 同截归属 (原"按同 session 归属"的序号化等价物)。
     划分: 稳定期 4 键与 2 键各自 RandomState(2024) 顺序 permutation 80/20
     (先 4 键后 2 键, 固定顺序)。返回 dict:
       train_all  训练池 = train4 + 角点段源 train2 (拼接顺序固定, 四入口共用保同流)
       test4 / test2 / train4 / train2 / deploy4 / deploy2 (deploy=稳定期全量) / desc
     依据: 角点 S(∅,a,b,∅) 原为零样本外推 (实测偏差 −6.0±0.8ms), 2 键参与训练使其
     内插化; 模型结构共享使稀疏覆盖 (n=1) 也被整体统计强度正则化 (README 附录 A.4)。"""
-    sess4, sess2 = load_sessions(path)
-    names = list(sess4.keys())
-    med = np.array([np.median([ts[2] for _, ts in sess4[s]]) for s in names])
-    sm = np.array([np.median(med[max(0, i - smooth + 1):i + 1]) for i in range(len(med))])
+    rows = load_trials(path)
+    idx4 = [i for i, (c, _) in enumerate(rows) if len(c) == 4]
+    tot4 = [rows[i][1][2] for i in idx4]               # d_d = trial 总时
+    nb = -(-len(tot4) // block)                        # 块数 (尾块可小, 同旧版尾 session 可小)
+    med = np.array([np.median(tot4[b * block:(b + 1) * block]) for b in range(nb)])
+    sm = np.array([np.median(med[max(0, i - smooth + 1):i + 1]) for i in range(nb)])
     R = float(np.median(sm[-ref_last:]))
-    k = len(sm)
+    k = nb
     while k - 1 >= 0 and sm[k - 1] <= R * band:
         k -= 1
-    stable4 = [t for s in names[k:] for t in sess4[s]]
-    stable2 = [t for s in names[k:] for t in sess2.get(s, [])]
-    n_st = len(sm) - k
-    warn = f"  ⚠ 稳定期仅 {n_st} session (< {min_sessions}), 样本偏少" if n_st < min_sessions else ""
+    if k >= nb:                                        # 末块即超带 (退化, 同旧版空稳定期)
+        g0, stable4, stable2 = len(rows), [], []
+    else:
+        g0 = idx4[k * block]                           # 稳定期首 trial 的全局 ok 行号 (混合序锚点)
+        stable = rows[g0:]
+        stable4 = [(c, t) for c, t in stable if len(c) == 4]
+        stable2 = [(c, t) for c, t in stable if len(c) == 2]
+    n_st = nb - k
+    warn = f"  ⚠ 稳定期仅 {n_st} 块 (< {min_blocks}), 样本偏少" if n_st < min_blocks else ""
     rng = np.random.RandomState(2024)
     i4 = rng.permutation(len(stable4)); nt4 = int(len(stable4) * .2)
     t4set = set(i4[:nt4])
@@ -369,8 +382,8 @@ def stable_pools(path, band=1.10, ref_last=5, smooth=3, min_sessions=8):
     t2set = set(i2[:nt2])
     train2 = [d for i, d in enumerate(stable2) if i not in t2set]
     test2  = [d for i, d in enumerate(stable2) if i in t2set]
-    desc = (f"稳定期: session[{k}] {names[k]} 起 ({n_st}/{len(names)} session, "
-            f"4键 {len(stable4)}/{sum(len(v) for v in sess4.values())} + 2键 {len(stable2)} trial, "
+    desc = (f"稳定期: 序号块[{k}] (ok 行 #{g0 + 1}/{len(rows)}) 起 ({n_st}/{nb} 块×{block}, "
+            f"4键 {len(stable4)}/{len(idx4)} + 2键 {len(stable2)} trial, "
             f"R={R:.0f}ms, 带=R×{band:.2f}){warn}")
     return {"train_all": train4 + train2, "train4": train4, "test4": test4,
             "train2": train2, "test2": test2,

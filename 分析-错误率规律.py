@@ -264,7 +264,13 @@ with open(_DIR / "产物" / "当量-键对错误率.txt", "w", encoding="utf-8")
 print(f"  已导出 当量-键对错误率.txt (列: 角点/首段/尾段/中段, p=有前键 n=有后键)")
 print(f"  类均值 P_err: 角点 {P00.mean()*100:.2f}% / 首段 {P01.mean()*100:.2f}% / "
       f"尾段 {P10.mean()*100:.2f}% / 中段 {P11.mean()*100:.2f}%")
-print(f"  平均错误成本 (×500ms): T₂ 500×角点 = {500*P00.mean():.2f}ms | "
-      f"T₃ 500×(首+尾) = {500*(P01+P10).mean():.2f}ms | T₄ 500×(首+中+尾) = {500*(P01+P11+P10).mean():.2f}ms")
+try:
+    _cl = [l for l in (_DIR / "产物" / "错误成本-实测值.txt").read_text(encoding="utf-8").splitlines()
+           if l and not l.startswith("#") and not l.startswith("cost_ms")]
+    _ec = float(_cl[-1].split("\t")[0])
+    print(f"  平均错误成本 (×实测 {_ec:.0f}ms, 来源 产物/错误成本-实测值.txt): "
+          f"T₂ = {_ec*P00.mean():.2f}ms | T₃ = {_ec*(P01+P10).mean():.2f}ms | T₄ = {_ec*(P01+P11+P10).mean():.2f}ms")
+except Exception:
+    print("  平均错误成本: 未找到 产物/错误成本-实测值.txt (先跑 分析-错误成本.py)")
 k = max(range(900), key=lambda i: P11[i])
 print(f"  极值键对: {pairs[k][0]}{pairs[k][1]} 角点 {P00[k]*100:.1f}% / 尾段 {P10[k]*100:.1f}% / 中段 {P11[k]*100:.1f}%")
