@@ -189,15 +189,30 @@ class SpeedTest:
             self._check_all_released()
             self._release_timeout = self.root.after(500, self._force_advance)
 
+    def _unreleased_counts(self):
+        """FIFO 未配对按下计数 {键: 数} — 全 0 即本试次全部按下已释放。
+        2026-09-05 修复 d_u 偶发缺失 (正确 4 键行 ~0.35%, a/b/c_u 正常仅 d_u=0):
+        原 _check_all_released 按 'u' 事件总数 ≥ nkeys 判定, 前试次滞留的游离释放
+        或同键重复 KeyRelease 会虚增计数 → 末键按下瞬间即提前记录, d_u 恒为 0。"""
+        pend = {}
+        for e in self.events:
+            if e[0] == 'd':
+                pend[e[1]] = pend.get(e[1], 0) + 1
+            elif pend.get(e[1], 0) > 0:
+                pend[e[1]] -= 1
+        return pend
+
     def on_release(self, event):
         ch = event.char.lower()
         if not ch or ch not in LETTERS:
             return
         t = time.perf_counter()
         if self.phase in ("typing", "blocked", "releasing"):
-            self.events.append(('u', ch, t - self.t0))
-            if self.phase == "releasing":
-                self._check_all_released()
+            # 只记录有未配对按下的释放 (游离释放=滞留/重复, 在此丢弃, 防污染配对)
+            if self._unreleased_counts().get(ch, 0) > 0:
+                self.events.append(('u', ch, t - self.t0))
+                if self.phase == "releasing":
+                    self._check_all_released()
 
     def _record(self, ok):
         """ok=True: 正确试次; ok=False: 错误试次"""
@@ -268,14 +283,19 @@ class SpeedTest:
         self.total_trials += 1
 
     def _check_all_released(self):
-        """检查是否全部键已释放，若是则记录并推进"""
-        ups = [e[1] for e in self.events if e[0] == 'u']
-        if len(ups) >= self.nkeys:
-            if hasattr(self, '_release_timeout'):
-                self.root.after_cancel(self._release_timeout)
-                del self._release_timeout
-            self._record(ok=True)
-            self._schedule_next()
+        """检查是否全部按下均已释放（FIFO 配对口径），若是则记录并推进。
+        2026-09-05: 判定从未配对计数改为清零检查（原 ups 总数计数会被游离/重复
+        释放虚增而在末键按下瞬间提前记录 → d_u 恒 0）。"""
+        downs = [e for e in self.events if e[0] == 'd']
+        if len(downs) < self.nkeys:
+            return
+        if any(v > 0 for v in self._unreleased_counts().values()):
+            return
+        if hasattr(self, '_release_timeout'):
+            self.root.after_cancel(self._release_timeout)
+            del self._release_timeout
+        self._record(ok=True)
+        self._schedule_next()
 
     def _force_advance(self):
         """超时兜底：释放不全也强制推进"""

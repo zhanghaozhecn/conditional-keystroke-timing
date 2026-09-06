@@ -5,22 +5,33 @@
 读: 当量-段表.npz      F[p,a,b,n] (31,30,30,31) 原始段当量 S(p,a,b,n) ms
     当量-键对错误率.txt 900 键对 × 4 签名类 P_err(a,b | 有无前键, 有无后键)
        (2026-09-02 签名版: 错误率随码内位置爬升, 角点 ~0.6% ↔ 尾段 ~3.2%)
+    错误成本-实测值.txt  错误成本 cost_ms (2026-09-06 起替代固定 500ms 常数, 用户决策;
+       由 分析-错误成本.py 从 数据/错误成本-错误键.tsv 自动导出, 随采集动态更新;
+       忽略连续文本 vs 4键限长文本的 regime 差异——错误时间难测, 连续文本更简单)
 
-写: 当量-修正段表.npz  C[p,a,b,n] = S(p,a,b,n) + 500ms × P_err(a,b | sig(p), sig(n))
+写: 当量-修正段表.npz  C[p,a,b,n] = S(p,a,b,n) + cost_ms × P_err(a,b | sig(p), sig(n))
     （错误项按段 (p,n) 签名取列: p≠∅=有前键, n≠∅=有后键, 与 S 同语义;
-      错误损失 500ms = 退格+注意力+重输, 数据推导 ~455ms, 与键对难度解耦——见 README §4.6）
+      cost_ms = 错误成本实测值 (净成本: 首错按下→首错位打对), 见 README §4.6/§4.7）
     当量-2-4键.txt     2/3/4 键总当量 = 修正段求和 (ms, 期望耗时原值不归一化):
       T₂(ab)   = C[∅,a,b,∅]                                  (角点, 2 键试次验证中)
       T₃(abc)  = C[∅,a,b,c] + C[a,b,c,∅]
       T₄(abcd) = C[∅,a,b,c] + C[a,b,c,d] + C[b,c,d,∅]
 
-运行顺序: 击键模型.py --full (出段表) → 分析-错误率规律.py (出错误率表) → 本脚本。
+运行顺序: 击键模型.py --full (出段表) → 分析-错误率规律.py (出错误率表)
+       → 分析-错误成本.py (出错误成本实测值) → 本脚本。
 """
 from pathlib import Path
+import sys
 import numpy as np
 
 PROJ = Path(__file__).resolve().parent / "产物"   # 2026-09-05 目录重组: 四件产物入 产物/
-ERR_MS = 500.0
+# 错误成本 = 实测值 (09-06 起动态来源, 替代固定 500ms): 末行 "cost_ms\tn\tSE_ms" 数据行
+try:
+    _cl = [l for l in (PROJ / "错误成本-实测值.txt").read_text(encoding="utf-8").splitlines()
+           if l and not l.startswith("#") and not l.startswith("cost_ms")]
+    ERR_MS, ERR_N = float(_cl[-1].split("\t")[0]), int(_cl[-1].split("\t")[1])
+except Exception:
+    sys.exit("缺 产物/错误成本-实测值.txt — 先跑 分析-错误成本.py (错误成本实测值来源)")
 L = "abcdefghijklmnopqrstuvwxyz;,./"   # 30 键 (3 行 10 列完整 QWERTY)
 E = 30                                  # ∅ 索引
 
@@ -41,11 +52,11 @@ for ab, v in perr.items():
     i, j = L.index(ab[0]), L.index(ab[1])
     Pmat[0, 0, i, j], Pmat[0, 1, i, j], Pmat[1, 0, i, j], Pmat[1, 1, i, j] = v
 assert len(perr) == len(L)**2, "错误率表应覆盖 900 键对"
-print(f"键对错误率: {len(perr)} 对 × 4 签名类 (错误损失 {ERR_MS:.0f}ms)  类均值: "
+print(f"键对错误率: {len(perr)} 对 × 4 签名类 (错误损失实测 {ERR_MS:.1f}ms, n={ERR_N})  类均值: "
       f"角点 {Pmat[0,0].mean()*100:.2f}% / 首段 {Pmat[0,1].mean()*100:.2f}% / "
       f"尾段 {Pmat[1,0].mean()*100:.2f}% / 中段 {Pmat[1,1].mean()*100:.2f}%")
 
-# ── 修正段表: +500×P_err(a,b|签名), 按段 (p,n) 签名取列 ──
+# ── 修正段表: +实测成本×P_err(a,b|签名), 按段 (p,n) 签名取列 ──
 # Pexp[p,a,b,n]: p<30=有前键, p=30=∅; n<30=有后键, n=30=∅ → 值 = Pmat[有无前键, 有无后键, a, b]
 Pexp = np.empty((31, len(L), len(L), 31), dtype=Pmat.dtype)
 Pexp[:30, :, :, :30] = Pmat[1, 1][None, :, :, None]   # 有前+有后 (中段)
@@ -57,11 +68,12 @@ for p_, a_, b_, n_ in [(0,1,2,3), (30,1,2,3), (0,1,2,30), (30,1,2,30), (15,7,8,2
 C = F + ERR_MS * Pexp
 np.savez_compressed(PROJ / "当量-修正段表.npz", F=C,
                     letters=np.array(list(L)), empty=np.int64(E),
-                    version=np.int64(3),
-                    note=np.array("修正段当量 C(p,a,b,n)=S(p,a,b,n)+500×P_err(a,b|有无前键p,有无后键n) ms; "
+                    version=np.int64(3), cost_ms=np.float64(ERR_MS),
+                    note=np.array(f"修正段当量 C(p,a,b,n)=S(p,a,b,n)+{ERR_MS:.1f}×P_err(a,b|有无前键p,有无后键n) ms "
+                                  "(cost=错误成本实测值, 来源 错误成本-实测值.txt); "
                                   "T2=C[30,a,b,30] T3=C[30,a,b,c]+C[a,b,c,30] "
                                   "T4=C[30,a,b,c]+C[a,b,c,d]+C[b,c,d,30]"))
-print(f"输出: 当量-修正段表.npz  (C{C.shape}, 修正 = 段 + 500×签名错误率, version 3)")
+print(f"输出: 当量-修正段表.npz  (C{C.shape}, 修正 = 段 + {ERR_MS:.1f}×签名错误率 (实测 n={ERR_N}), version 3)")
 
 # ── 2-4 键总当量表 = 修正段求和 ──
 T2c = np.maximum(C[E, :, :, E], 0.0)
@@ -70,7 +82,7 @@ T4c = C[E, :, :, :E][:, :, :, None] + C[:E, :, :, :E] + C[:E, :, :, E][None, :, 
 
 total = len(L)**2 + len(L)**3 + len(L)**4
 with open(PROJ / "当量-2-4键.txt", "w", encoding="utf-8") as f:
-    f.write("# 2-4 键位当量 (ms, 期望耗时原值含错误成本: 修正段 = 段 + 500ms×P_err(a,b|有无前键,有无后键))\n")
+    f.write(f"# 2-4 键位当量 (ms, 期望耗时原值含错误成本: 修正段 = 段 + {ERR_MS:.1f}ms×P_err(a,b|有无前键,有无后键), 实测错误成本)\n")
     f.write("# T2=C[∅,a,b,∅](角点,2键验证中) T3=C[∅,a,b,c]+C[a,b,c,∅] T4=C[∅,a,b,c]+C[a,b,c,d]+C[b,c,d,∅]\n")
     f.write("code\t当量\n")
     buf = []
