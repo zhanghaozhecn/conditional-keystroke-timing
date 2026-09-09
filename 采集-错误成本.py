@@ -11,8 +11,9 @@
   间隔; 假警报退格 (无开敞 episode) 只计数。
 
 范式: 单一显示框逐字符着色——白=未打, 绿=打对, 红=打错, 黄底=当前位置 (键对键转录
-  范式; 着色使错误发现基本为立即型 → 测短码语境口径)。退格修正, 串完成自动进入
-  下一串 (800-1500ms 随机暂停)。
+  范式; 着色使错误发现基本为立即型 → 测短码语境口径)。退格修正; 全部打对才完成
+  (末位打错不跳串, 悬置至退格改对——2026-09-07 修正: 此前末位打错直接完成, 该错误
+  计入事件数但永远无时长=截断), 完成后随机暂停 (800-1500ms) 进入下一串。
 
 记录 (2026-09-05 定稿, 用户决策"只记录错误键"): episode 判定在本工具实时完成,
   仅落盘错误事件 + 每串一行汇总 → 数据/错误成本-错误键.tsv
@@ -145,6 +146,8 @@ class CostCollector:
         ch = event.char.lower()
         if not ch or ch not in LETTERS:
             return
+        if self.pos >= len(self.stream):
+            return                      # 末位打错悬置: 仅退格可继续 (打对则上一按已完成本串)
         t = self._t()
         self.n_press += 1
         if ch == self.stream[self.pos]:
@@ -170,8 +173,8 @@ class CostCollector:
         self.phase = "typing"
         self._bookkeep("p", opened)
         self._refresh()
-        if self.pos >= len(self.stream):
-            self._complete_stream()
+        if self.pos >= len(self.stream) and self.typed == self.stream:
+            self._complete_stream()     # 全部打对才完成; 末位(或吸收残留)打错 → 退格修正后再完成
 
     def _bookkeep(self, kind, opened=False):
         """episode 簿记: imm 由起始后第一个事件定 (跳过开场事件本身); 首 p 即首盲字母"""

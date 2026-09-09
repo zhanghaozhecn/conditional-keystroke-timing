@@ -26,7 +26,7 @@
   附 letters/empty/version 元数据; 组装当量表.py / 组装-chai当量表.py 查表组合。
   模型: keystroke_model.pt (deep2×5 权重) + 击键模型-xgb.json (XGB 分量)。
 """
-import argparse, sys, numpy as np, torch, torch.nn as nn, torch.nn.functional as F
+import argparse, os, sys, numpy as np, torch, torch.nn as nn, torch.nn.functional as F
 from pathlib import Path
 
 # 运行环境固定 (可复现性, 2026-08-18 实测):
@@ -35,10 +35,54 @@ from pathlib import Path
 #   初始化) 依赖它, 而 train(seed) 只重播轨迹不重播构造 → 历史上同命令重跑结果漂移
 #   ("±1.4ms 种子波动"的主要来源)。播种后同代码+同数据跨进程逐位可复现;
 #   best-of-N 的多次构造沿确定性流推进, 初始化仍互不相同, 多样性不受影响。
-# 注意: 模型构造消耗全局 RNG — 跨脚本绝对数字不可比 (构造时机不同 → 初始化不同),
-# 变体对比须同脚本同流内进行 (08-27 实验教训)。
+# 注意: 裸构造 KeystrokeModel() 仍消耗全局 RNG — 跨脚本绝对数字不可比, 变体对比须
+#   同脚本同流内进行 (08-27 实验教训); train_members 路径 (2026-09-09) 的成员构造
+#   显式种子化, 与调用流位置无关, 跨脚本可比。
 torch.set_num_threads(1)
 torch.manual_seed(0)
+
+# 并行训练 (2026-09-09): 成员构造显式种子化 (fork_rng + manual_seed(seed)), train()
+# 入口本就重播 torch+numpy RNG → 每个成员 = (seed, 数据) 的纯函数, 多进程并行与串行
+# 逐位一致; 2026-08-18 方案里"构造沿全局流推进"的跨成员 RNG 纠缠就此消除 (成员多样
+# 性不变: 各种子初始化仍互不相同)。历史指标因此在噪声带内挪动一次 (~±1ms, 等同一次
+# 测试集重洗)。KJ_SEQ=1 强制串行 (调试/逐位对照)。
+_POOL = None
+
+def _train_member(seed, prev, a, b, nxt, ph, tgt, loss_fn="mse"):
+    """单成员: 构造 (seed 显式种子化) + 训练 → (model, 全数据段MAE, 验证段MAE)"""
+    with torch.random.fork_rng(devices=[]):
+        torch.manual_seed(seed)
+        m = KeystrokeModel()
+    seg_mae, va_mae = train(m, prev, a, b, nxt, ph, tgt, seed=seed, loss_fn=loss_fn)
+    return m, seg_mae, va_mae
+
+def _main_spawn_safe():
+    """Windows spawn 子进程会重导入调用方主模块顶层代码 — 主脚本无 __main__ 保护时
+    并行会让每个子进程重跑其训练逻辑; 检测不到保护时回退串行 (结果一致, 速度同旧版)"""
+    mn = sys.modules.get("__main__")
+    f = getattr(mn, "__file__", "")
+    if not f:
+        return False
+    try:
+        return '"__main__"' in Path(f).read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return False
+
+def train_members(jobs):
+    """jobs: [(seed, prev, a, b, nxt, ph, tgt[, loss_fn])] → 按序 [(model, 段MAE, 验证段MAE)]。
+    各 job 为纯函数 → 结果与执行方式 (并行/串行) 无关。调用方主脚本须有 __main__ 保护"""
+    if os.environ.get("KJ_SEQ") or len(jobs) <= 1 or not _main_spawn_safe():
+        return [_train_member(*j) for j in jobs]
+    global _POOL
+    if _POOL is None:
+        import atexit, multiprocessing as mp
+        _POOL = mp.get_context("spawn").Pool(min(len(jobs), os.cpu_count() or 1))
+        atexit.register(_POOL.terminate)        # 避免 interpreter 退出时 Pool.__del__ 报错
+    try:
+        return _POOL.starmap(_train_member, jobs)
+    except Exception as e:                      # 并行环境异常 → 串行兜底 (结果一致)
+        print(f"  [并行不可用 ({type(e).__name__}: {e}), 回退串行]")
+        return [_train_member(*j) for j in jobs]
 
 # ═══════════════════ 键盘布局 ═══════════════════
 # 3 行 10 列完整 QWERTY: 30 键 (26 字母 + ; , . /)
@@ -233,11 +277,8 @@ class BlendModel:
     @classmethod
     def fit(cls, prev, a, b, nxt, ph, tgt):
         xgb_fit = train_xgb(prev, a, b, nxt, ph, tgt)
-        members = []
-        for s in cls.SEEDS:
-            m = KeystrokeModel()
-            train(m, prev, a, b, nxt, ph, tgt, seed=s)
-            members.append(m)
+        members = [m for m, _, _ in train_members([(s, prev, a, b, nxt, ph, tgt)
+                                                   for s in cls.SEEDS])]
         return cls(xgb_fit, members)
     def _batch(self, ids, ph):
         """ids: torch (B,4) [p,a,b,n]; 返回 torch 张量 (调用方 .numpy())"""
@@ -442,11 +483,11 @@ def residual_filter_segments(data, prev, a, b, nxt, ph, tgt, k=3.0, m0_seeds=5):
       判定"复活"属设计行为, 属保守方向)。
       返回 (keep 掩码, 三段齐全 trial 子集)。"""
     keep0 = mad_filter_segments(data, tgt)[0]
-    # M0: 段位 MAD 干净数据训练, 验证集选优 (与主训练同协议)
+    # M0: 段位 MAD 干净数据训练, 验证集选优 (与主训练同协议; 5 种子并行 09-09)
+    outs = train_members([(s, prev[keep0], a[keep0], b[keep0], nxt[keep0], ph[keep0], tgt[keep0])
+                          for s in range(m0_seeds)])
     best_va, M0 = float("inf"), None
-    for s in range(m0_seeds):
-        m = KeystrokeModel()
-        _, va = train(m, prev[keep0], a[keep0], b[keep0], nxt[keep0], ph[keep0], tgt[keep0], seed=s)
+    for m, _, va in outs:
         if va < best_va:
             best_va, M0 = va, m
     ids = torch.tensor(np.stack([prev, a, b, nxt], axis=1))
@@ -660,13 +701,10 @@ def main():
     prev, a, b, nxt, ph, tgt = prev[keep], a[keep], b[keep], nxt[keep], ph[keep], tgt[keep]
 
     print(f"\n=== 评估模型训练 (v3 混合: XGB {W_XGB} + deep2×{len(BlendModel.SEEDS)} 固定种子平均) ===")
-    members = []
-    for s in BlendModel.SEEDS:
-        m = KeystrokeModel()
-        seg_mae, va_mae = train(m, prev, a, b, nxt, ph, tgt, seed=s)
+    outs = train_members([(s, prev, a, b, nxt, ph, tgt) for s in BlendModel.SEEDS])
+    for s, (_, seg_mae, va_mae) in zip(BlendModel.SEEDS, outs):
         print(f"  seed {s}: 段MAE={seg_mae:5.1f}ms  验证段MAE={va_mae:5.1f}ms")
-        members.append(m)
-    blend_m = BlendModel(train_xgb(prev, a, b, nxt, ph, tgt), members)
+    blend_m = BlendModel(train_xgb(prev, a, b, nxt, ph, tgt), [m for m, _, _ in outs])
 
     # ── 主指标: 保留口径 (2026-08-26 起默认只展示保留口径, 全口径需时另行说明) ──
     tp, ta, tb, tn, tph, tt = build_tensors(test_data)
@@ -707,13 +745,10 @@ def main():
     dkeep, _ = residual_filter_segments(deploy_all, dprev, da, db, dn, dph, dtgt)
     print(f"全数据 B4b: 保留 {int(dkeep.sum())}/{len(dtgt)} 段  (稳定期全量, 4键+2键角点)")
     dprev, da, db, dn, dph, dtgt = dprev[dkeep], da[dkeep], db[dkeep], dn[dkeep], dph[dkeep], dtgt[dkeep]
-    dmembers = []
-    for s in BlendModel.SEEDS:
-        m = KeystrokeModel()
-        seg_mae, va_mae = train(m, dprev, da, db, dn, dph, dtgt, seed=s)
+    douts = train_members([(s, dprev, da, db, dn, dph, dtgt) for s in BlendModel.SEEDS])
+    for s, (_, seg_mae, va_mae) in zip(BlendModel.SEEDS, douts):
         print(f"  seed {s}: 段MAE={seg_mae:5.1f}ms  验证段MAE={va_mae:5.1f}ms")
-        dmembers.append(m)
-    deploy_m = BlendModel(train_xgb(dprev, da, db, dn, dph, dtgt), dmembers)
+    deploy_m = BlendModel(train_xgb(dprev, da, db, dn, dph, dtgt), [m for m, _, _ in douts])
 
     print("\n=== 导出 ===")
     ART_DIR.mkdir(exist_ok=True)
