@@ -6,6 +6,8 @@ episode 判定唯一源 = 采集-错误成本.py (实时判定, 只落盘错误�
 连锁错(含同位二次错)在采集端吸收为单事件——错误只计首错、时长只记首错间隔, 用户决策 2026-09-05);
 本脚本只做聚合: 全体/立即发现/延迟发现均值、盲打长度分布、连续模式按错率
 (对标停止范式 P_err 的 regime 差异)、时间趋势 (全局序号: 线性趋势+四分位分段+子组前后半;
+坐姿稳定性判据段 (09-07 用户决策: 现值认定稳定, 续采至练习效应可忽略即定案——
+三判据 = 簇稳健SE≤30ms 且 坐姿斜率不显著 且 近5坐姿均值与全体差<40ms);
 session=进程生命周期, 长短不一且开关与坐姿不对应, 不参与分组——2026-09-06 用户决策)、
 按目标键/键对分组
 (等成本假设的检验入口——现行假设任意键纠正时间相同, 实际可能与目标键或
@@ -140,6 +142,40 @@ if n_ep >= 8:
         if len(sub) >= 8:
             h = len(sub) // 2
             print(f"  {name}子组前后半: {sum(sub[:h]) / h:.0f}ms → {sum(sub[h:]) / (len(sub) - h):.0f}ms")
+    # 坐姿稳定性 (2026-09-07 用户决策: 现值认定为稳定时间, 续采至练习效应可忽略即定案)
+    # 定案判据 (三条全满足): ① 簇稳健 SE ≤ 30ms (均值位置钉住, T₄ 传导 <±2ms)
+    #   ② 坐姿均值×坐姿序 斜率不显著 (|t| < t_{.975,df})  ③ 最近 5 坐姿均值与全体均值差 < 40ms (近端平稳)
+    sits = []
+    for s in dict.fromkeys(e["session"] for e in episodes):   # 文件序 = 坐姿时间序
+        v = [e["dur"] for e in episodes if e["session"] == s]
+        if len(v) >= 2:
+            sits.append((len(v), sum(v) / len(v)))
+    if len(sits) >= 4:
+        ns_ = len(sits)
+        tot = sum(c for c, _ in sits)
+        grand2 = sum(c * m for c, m in sits) / tot
+        vc = sum(c * c * (m - grand2) ** 2 for c, m in sits) / tot ** 2 * ns_ / (ns_ - 1)
+        se_cl = math.sqrt(vc)
+        mid = (ns_ + 1) / 2
+        mm = sum(m for _, m in sits) / ns_
+        sxx = sum((i - mid) ** 2 for i in range(1, ns_ + 1))
+        sxy = sum((i - mid) * (m - mm) for i, (_, m) in enumerate(sits, 1))
+        syy = sum((m - mm) ** 2 for _, m in sits)
+        sl = sxy / sxx
+        rr = sxy / math.sqrt(sxx * syy) if syy else 0.0
+        sse = sum((m - (mm + sl * (i - mid))) ** 2 for i, (_, m) in enumerate(sits, 1))
+        se_sl = math.sqrt(sse / (ns_ - 2) / sxx) if sse else 0.0
+        tc = {2: 4.303, 3: 3.182, 4: 2.776, 5: 2.571, 6: 2.447, 7: 2.365,
+              8: 2.306, 9: 2.262, 10: 2.228}.get(ns_ - 2, 2.0)
+        tval = sl / se_sl if se_sl else 0.0
+        recent = sum(m for _, m in sits[-5:]) / min(5, ns_)
+        c1, c2, c3 = se_cl <= 30, abs(tval) < tc, abs(recent - grand2) < 40
+        print(f"  坐姿均值序列 ({ns_} 坐姿): " + " ".join(f"{m:.0f}" for _, m in sits))
+        print(f"  定案判据: ① 簇SE {se_cl:.0f}ms {'✓' if c1 else '✗'}(≤30)  "
+              f"② 练习斜率 {sl:+.1f}ms/坐姿 t={tval:+.2f} {'✓' if c2 else '✗'}(|t|<{tc:.2f})  "
+              f"③ 近5坐姿均值 {recent:.0f} vs 全体 {grand2:.0f} {'✓' if c3 else '✗'}(差<40)")
+        print("  → " + ("✓✓ 三判据全满足, 可定案 (用户确认后冻结 cost)" if c1 and c2 and c3
+                        else "未达定案判据, 继续采集监控"))
 
 # 等成本假设检验入口: 按目标键 / 前键+目标键键对 (样本稀疏时仅积累观察)
 by_want = defaultdict(list)
