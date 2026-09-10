@@ -327,6 +327,7 @@ DATA_TSV  = _DIR / "数据" / "击键测速数据.tsv"
 ART_DIR   = _DIR / "产物"                 # 全部计算产物 (导出方负责 mkdir)
 SEG_NPZ   = ART_DIR / "当量-段表.npz"      # 原始段母表 (本文件 --full 导出)
 ERR_TXT   = ART_DIR / "当量-键对错误率.txt" # 错误率表 (分析-错误率规律.py 导出)
+CHEN_TXT  = _DIR / "陈一凡当量表.txt"      # 陈表对比数据 (键对\t当量, 随仓库分发)
 CORR_NPZ  = ART_DIR / "当量-修正段表.npz"  # 修正段表 (组装当量表.py)
 T24_TXT   = ART_DIR / "当量-2-4键.txt"     # 2-4 键总当量 (组装当量表.py)
 MODEL_PT  = ART_DIR / "keystroke_model.pt"
@@ -653,6 +654,63 @@ def _bigram_ms(model):
     with torch.no_grad():
         return model._batch(ids, torch.tensor(phs)).numpy().reshape(n, n)
 
+def load_chen():
+    """陈一凡 1986 两键当量表 txt (键对\t当量, 900 行定向) → {(a,b): 当量}。
+    来源 2026-09-09 自极速赛码器 击键当量.xls 一次性导出 (本表随仓库分发,
+    对比自此内嵌主流程——原 对比-条件vs陈表.py 与 评估-段表.npz 中间产物均废)"""
+    d = {}
+    for line in CHEN_TXT.read_text(encoding="utf-8").splitlines():
+        if line and not line.startswith("#"):
+            ab, v = line.split("\t")
+            d[(ab[0], ab[1])] = float(v)
+    return d
+
+def chen_comparison(m, pools, test_full):
+    """陈一凡表对比 (README §5.3): [1] 4 码累加 (陈表 ×k₄) + [2] 2 码角点 (×k₂),
+    陈表两项各自独立比例缩放。2026-09-09 内嵌主流程 (用户决策): 直接用评估模型
+    in-memory (T₄ = total_preds / 角点 = B 切片) — 无重训、无中间产物, 与 §5.2
+    主指标严格同一模型。"""
+    from collections import defaultdict
+    from scipy.stats import spearmanr
+    CYv = np.array([[load_chen()[(x, y)] for y in LETTERS] for x in LETTERS])
+    KI = KEY_TO_IDX
+
+    ys = np.array([ts[2] for _, ts in test_full])
+    p_cond = total_preds(m, test_full)
+    p_chen = np.array([CYv[KI[c[0]], KI[c[1]]] + CYv[KI[c[1]], KI[c[2]]] + CYv[KI[c[2]], KI[c[3]]]
+                       for c, _ in test_full], dtype=np.float64)
+    print(f"\n=== 陈一凡表对比 [1] 4 码累加 (保留口径, n={len(test_full)} trial) ===")
+    print(f"  {'方法':12s} {'MAE':>7s}ms {'×k':>8s} {'scale后MAE':>10s} {'scale后R²':>9s} {'排名':>7s}")
+    for name, p in (("条件段模型", p_cond), ("陈一凡累加", p_chen)):
+        k = float((ys * p).sum() / (p ** 2).sum())
+        errs = np.abs(p * k - ys)
+        r2s = 1 - float(np.sum(errs ** 2)) / max(float(np.sum((ys - ys.mean()) ** 2)), 1e-9)
+        sp, _ = spearmanr(p, ys)
+        print(f"  {name:12s} {np.abs(p - ys).mean():7.1f} {k:8.3f} {errs.mean():10.1f} {r2s:+9.3f} {sp:7.4f}")
+
+    pv = defaultdict(list)
+    for code, ts in pools["test2"]:
+        pv[(KI[code[0]], KI[code[1]])].append(ts[0])
+    B = _bigram_ms(m)                     # 角点切片 S(∅,a,b,∅)
+    samples = []                          # (实测, 模型预测, 陈表值)
+    for (i, j), v in pv.items():
+        v = np.array(v)
+        med = np.median(v)
+        mad = np.median(np.abs(v - med))
+        sig = 1.4826 * mad if mad > 0 else 1.0
+        c = v[v < med + 3 * sig]
+        samples += [(t, B[i, j], CYv[i, j]) for t in c]
+    samples = np.array(samples)
+    y2, pc, pcy = samples[:, 0], samples[:, 1], samples[:, 2]
+    k2 = float((y2 * pcy).sum() / (pcy ** 2).sum())
+    print(f"=== 陈一凡表对比 [2] 2 码角点 (留出 trial 清洗后, n={len(y2)}) ===")
+    for name, p, k in (("条件段模型(角点)", pc, None), ("陈一凡表", pcy, k2)):
+        pp = p if k is None else p * k
+        err = np.abs(pp - y2)
+        sp, _ = spearmanr(p, y2)
+        tag = "本征 ms" if k is None else f"×k₂={k:.1f}"
+        print(f"  {name:14s}: MAE {err.mean():6.1f}ms (中位 {np.median(err):5.1f})  [{tag}]  排名 {sp:.4f}")
+
 def export_seg_table(model, out_path):
     """4-D 段当量母表 (npz): F (31,30,30,31) float32 + 元数据。
     查询组合 (组装当量表.py / 组装-chai当量表.py):
@@ -731,6 +789,12 @@ def main():
             errs += list(np.abs(c - B[i, j])); diffs += list(c - B[i, j])
         errs, diffs = np.array(errs), np.array(diffs)
         print(f"角点指标 (T₂ 留出 n={len(errs)}): 段MAE={errs.mean():5.1f}  偏差={diffs.mean():+5.1f} (中位 {np.median(diffs):+.1f})")
+
+    # ── 陈一凡表对比 (内嵌 2026-09-09, README §5.3; 评估模型 in-memory, 无重训无中间产物) ──
+    if CHEN_TXT.exists() and test_full:
+        chen_comparison(blend_m, pools, test_full)
+    elif not CHEN_TXT.exists():
+        print("\n(陈一凡当量表.txt 缺失, 跳过陈表对比)")
 
     if not full:
         print("\n研究模式: 仅训练评估。加 --full 追加部署模型训练 (全数据) + 导出当量表。")
