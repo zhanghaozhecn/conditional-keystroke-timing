@@ -265,9 +265,10 @@ print(f"  已导出 当量-键对错误率.txt (列: 角点/首段/尾段/中段
 print(f"  类均值 P_err: 角点 {P00.mean()*100:.2f}% / 首段 {P01.mean()*100:.2f}% / "
       f"尾段 {P10.mean()*100:.2f}% / 中段 {P11.mean()*100:.2f}%")
 try:
-    _cl = [l for l in (_DIR / "产物" / "错误成本-实测值.txt").read_text(encoding="utf-8").splitlines()
-           if l and not l.startswith("#") and not l.startswith("cost_ms")]
-    _ec = float(_cl[-1].split("\t")[0])
+    _ec = None
+    for l in (_DIR / "产物" / "错误成本-实测值.txt").read_text(encoding="utf-8").splitlines():
+        if l.startswith("cost_ms\t"):
+            _ec = float(l.split("\t")[1]); break
     print(f"  平均错误成本 (×实测 {_ec:.0f}ms, 来源 产物/错误成本-实测值.txt): "
           f"T₂ = {_ec*P00.mean():.2f}ms | T₃ = {_ec*(P01+P10).mean():.2f}ms | T₄ = {_ec*(P01+P11+P10).mean():.2f}ms")
 except Exception:
