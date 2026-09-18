@@ -5,9 +5,10 @@
 模型: P_err(a,b | 有无前键, 有无后键) = σ(w·feat9(a,b) + α·有前键 + β·有后键 + γ·前×后)
       签名与 S(p,a,b,n) 的 (p,n) 语义统一, 角点 (0,0) 为参考电平:
         4键 pos1→(0,1) 首段   pos2→(1,1) 中段   pos3→(1,0) 尾段   2键 pos1→(0,0) 角点
-      采纳依据 (2026-09-02): 错误率随码内位置爬升 (角点 0.63 / 首段 0.98 / 中段 2.16 /
-      尾段 3.17%), 无上下文模型对 T₂ 角点高估 ~7ms/条目; 交互项必需——纯加法形式角点
-      仍高估 2× (O/E 0.51), LRT χ²₁=5.97。事件级 AUC 0.650→0.698。
+      采纳依据 (09-14 当前数据复核, 实验/实验-错误率算法对比.py): 错误率随码内位置爬升
+      (角点 0.50 / 首段 0.98 / 中段 2.14 / 尾段 3.11%), 无上下文模型对 T₂ 角点高估;
+      交互项必需——纯加法形式角点高估 2.4× (O/E 0.41), 交互后 1.00, γ Wald p=0.004。
+      事件级 AUC 0.642→0.691 (5-fold CV)。
 事件口径 (2026-09-02 修正): 4 键 + 2 键行 (2 键行即角点 (0,0) 类, 首次参与);
       正确 trial 每键对 1 ok 事件; 错误 trial 在错键截断——错键对记 1 err、其前的
       键对记 ok (旧版把错键对同时记 ok+err, 双重计数 623 条, 已修); 首键即错不记
@@ -275,3 +276,27 @@ except Exception:
     print("  平均错误成本: 未找到 产物/错误成本-实测值.txt (先跑 分析-错误成本.py)")
 k = max(range(900), key=lambda i: P11[i])
 print(f"  极值键对: {pairs[k][0]}{pairs[k][1]} 角点 {P00[k]*100:.1f}% / 尾段 {P10[k]*100:.1f}% / 中段 {P11[k]*100:.1f}%")
+
+# ── 5. README §5.5 实证: 签名 vs 类盲 (2026-09-18 自 实验-README数字刷新.py 并入) ──
+# 类盲 = 同特征集但无签名项的逻辑回归; 差异 = 位置信息缺失对 T₂ 角点条目的系统性高估
+_ec2 = None
+try:
+    for l in (_DIR / "产物" / "错误成本-实测值.txt").read_text(encoding="utf-8").splitlines():
+        if l.startswith("cost_ms\t"):
+            _ec2 = float(l.split("\t")[1]); break
+except OSError:
+    pass
+if _ec2:
+    b_bl, _, _, _ = irls(np.concatenate([one, F9s], axis=1), Yerr)
+    Xp9s = (Xp9 - mu9) / sd9
+    P_bl = sig(b_bl[0] + Xp9s @ b_bl[1:])
+    print("\n=== README §5.5: 签名 vs 类盲 (类盲=无签名对照; 偏差与 P_err 成正比, 扭曲 2 键简码排序) ===")
+    print(f"  角点类均值: 签名 {P00.mean()*100:.2f}% vs 类盲 {P_bl.mean()*100:.2f}%  "
+          f"→ 高估 {_ec2*(P_bl.mean()-P00.mean()):.1f}ms/条目")
+    hi = np.argsort(P00)[-90:]
+    print(f"  高错误对 (角点前 10%): 签名 {P00[hi].mean()*100:.2f}% vs 类盲 {P_bl[hi].mean()*100:.2f}%  "
+          f"→ 高估 {_ec2*(P_bl[hi].mean()-P00[hi].mean()):.1f}ms/条目")
+    print(f"  平均错误成本: 类盲 T₂ {_ec2*P_bl.mean():.1f} / T₃ {2*_ec2*P_bl.mean():.1f} / T₄ {3*_ec2*P_bl.mean():.1f}"
+          f"   签名 T₂ {_ec2*P00.mean():.1f} / T₃ {_ec2*(P01+P10).mean():.1f} / T₄ {_ec2*(P01+P11+P10).mean():.1f}")
+else:
+    print("\n(未找到 产物/错误成本-实测值.txt, 跳过 §5.5 类盲对比)")

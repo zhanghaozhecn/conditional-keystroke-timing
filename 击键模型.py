@@ -13,8 +13,8 @@
   Fitts(b,n), 同手(a,n), Fitts(a,n)]; n=∅ 时 φsuc 全 0 (存在位=0)。
 部署形态 (v3, 2026-09-02, 用户确认采纳): BlendModel = 0.3×XGBoost(独热124+φ15)
   + 0.7×(deep2 × 固定种子 0-4 平均) — 无 best-of 选优 → 无选优抽签噪声 (决策带
-  从 ±3 缩至仅测试重洗 ~±1ms); 依据 实验-架构对比/架构对比2:
-  42.2-42.5ms / R²+0.60 / 段 26.2 (达实测噪声底) / 角点 15.5。
+  从 ±3 缩至仅测试重洗 ~±1ms); 依据 实验-架构对比3.py (09-14 当前数据重跑):
+  原始口径 总 41.6 / R²+0.592 / 段 25.8 / 角点 16.0 (对单模 base 44.0 −2.4, 对 ens5 −0.6)。
 
 查询公式 (词内语义, 全部查询点有训练分布覆盖, T₂ 角点由 2 键试次内插):
   两键当量  T₂(ab)   = S(∅,a,b,∅)
@@ -25,6 +25,9 @@
 导出 (2026-09-05 起入 产物/): 当量-段表.npz — F[p,a,b,n] 形状 (31,30,30,31), p/n 维 0-29=键、30=∅,
   附 letters/empty/version 元数据; 组装当量表.py / 组装-chai当量表.py 查表组合。
   模型: keystroke_model.pt (deep2×5 权重) + 击键模型-xgb.json (XGB 分量)。
+README 实证数字 (2026-09-18 起随 --full 输出, readme_evidence): §5.4 类型×前键 / 键对难度 /
+  模型视角 / 排序扭曲 / §6.1 rollover — 原 实验-README数字刷新.py 并入删除 (同 §5.3 内嵌演进);
+  §5.5 签名vs类盲随 分析-错误率规律.py 输出。
 """
 import argparse, os, sys, numpy as np, torch, torch.nn as nn, torch.nn.functional as F
 from pathlib import Path
@@ -109,7 +112,8 @@ def _precompute_phi():
     Fitts (MT = a + b·log2(1+D/W), W=键宽, 行距≈2 键宽); keygen (同指跨行最慢);
     Grudin 1983 (镜像手指换位). 消融两轮:
     - 逐特征 LOO 全部持平 (实验-特征消融.py, 2026-08-11, Δ<0.2ms) — φ 特征间互为冗余
-    - 整体删除 +1.7ms (2026-08-14, 无泄漏 trial 测试口径; 原实验-结构消融.py 已删) — φ 作为整体
+    - 整体删除 +1.7ms/角点 +3.2ms (09-14 当前数据复测, 实验-架构对比3.py no_phi;
+      原 2026-08-14 结构消融同值) — φ 作为整体
       提供嵌入补不上的几何先验, 价值在稀疏三元组外推 (2/3 段表条目零样本); LOO 在
       训练分布内做所以测不出。保留 φ 有实证支撑 (结构消融已删, 结论存档)"""
     feats = {}
@@ -224,8 +228,8 @@ class KeystrokeModel(_SegModel):
 
 class CPModel(_SegModel):
     """CP 张量分解: S(p,a,b,n) ≈ Σ_r U(p)·V(a)·W(b) + MLP 头 (e_n+φ15 并入头)。
-    备选架构 (历史对照): v1 验证集 R² 0.395 vs CP 0.343; 稳定期重审 50.6 vs 47.5
-    (实验-架构对比.py) 两时代皆差, 维持废弃。"""
+    备选架构 (历史对照): v1 验证集 R² 0.395 vs CP 0.343; 稳定期重审 50.6 vs 47.5;
+    当前数据重审 48.7 vs 44.0 (实验-架构对比.py, 09-14) 三时代皆差, 维持废弃。"""
     def __init__(self, rank=32, d_embed=12, d_hidden=24):
         super().__init__()
         self.U = nn.Embedding(len(LETTERS)+1, rank)   # 前键因子
@@ -268,8 +272,8 @@ def train_xgb(prev, a, b, nxt, ph, tgt):
 class BlendModel:
     """v3 混合部署模型: W×XGB + (1-W)×(KeystrokeModel deep2 × 固定 5 种子平均)。
     无 best-of 选优 (固定种子 0-4 全体平均) → 无选优抽签噪声, 同数据逐位确定。
-    依据 实验-架构对比2.py: 42.2-42.5ms / R²+0.60 / 段 26.2 (噪声底),
-    对 deep2ens5 单独 −0.5ms, 对 v2 base best-of-10 (45.3 口径) 约 −3ms。
+    依据 实验-架构对比3.py (09-14 当前数据重跑): 总 41.6 / R²+0.592 / 段 25.8 / 角点 16.0
+    (原始口径), 对 ens5 单独 −0.6ms, 对单模 base 44.0 −2.4ms。
     接口与 _SegModel 鸭子类型兼容 (seg/total/_batch/nparam)。"""
     SEEDS = (0, 1, 2, 3, 4)
     def __init__(self, xgb_fit, members):
@@ -711,14 +715,16 @@ def chen_comparison(m, pools, test_full):
         tag = "本征 ms" if k is None else f"×k₂={k:.1f}"
         print(f"  {name:14s}: MAE {err.mean():6.1f}ms (中位 {np.median(err):5.1f})  [{tag}]  排名 {sp:.4f}")
 
-def export_seg_table(model, out_path):
+def export_seg_table(model, out_path, F=None):
     """4-D 段当量母表 (npz): F (31,30,30,31) float32 + 元数据。
     查询组合 (组装当量表.py / 组装-chai当量表.py):
       T₂(ab)   = F[∅,a,b,∅]           (角点, 2 键试次验证中)
       T₃(abc)  = F[∅,a,b,c] + F[a,b,c,∅]
       T₄(abcd) = F[∅,a,b,c] + F[a,b,c,d] + F[b,c,d,∅]
-    v1 的 3-D 文本段表 (当量-段表.txt) 由本文件替代 (2026-08-29 npz 化)。"""
-    F = build_seg_table(model)
+    v1 的 3-D 文本段表 (当量-段表.txt) 由本文件替代 (2026-08-29 npz 化)。
+    F 可由调用方传入 (README 实证块复用, 免二次前向)。"""
+    if F is None:
+        F = build_seg_table(model)
     np.savez_compressed(out_path, F=F,
                         letters=np.array(list(LETTERS)), empty=np.int64(EMPTY),
                         version=np.int64(2),
@@ -726,6 +732,85 @@ def export_seg_table(model, out_path):
                                       "T2=F[30,a,b,30] T3=F[30,a,b,c]+F[a,b,c,30] "
                                       "T4=F[30,a,b,c]+F[a,b,c,d]+F[b,c,d,30]"))
     print(f"  当量-段表: {out_path}  (F {F.shape}, {F.size:,} 条, npz)")
+
+def readme_evidence(deploy_all, dprev, da, db, dn, dph, dtgt, dkeep, F):
+    """README 实证数字 (2026-09-18 起随 --full 输出; 原 实验/实验-README数字刷新.py 并入删除,
+    同 §5.3 陈表对比的"独立脚本→内嵌"演进)。复用内存中的部署池 B4b 掩码与段表 F, 零额外训练;
+    每块首行即数字意义注记, 与 README 节号对应。§5.5 签名vs类盲在 分析-错误率规律.py。"""
+    from collections import defaultdict
+    from scipy.stats import spearmanr
+
+    def ptype(a, b):
+        if a == b: return "同键重复"
+        if COL_TO_HAND[LETTER_TO_COL[a]] != COL_TO_HAND[LETTER_TO_COL[b]]: return "跨手"
+        return "同指异键" if COL_TO_FINGER[LETTER_TO_COL[a]] == COL_TO_FINGER[LETTER_TO_COL[b]] else "同手异指"
+
+    pos, _ = _seg_layout(deploy_all)
+    sel = dkeep.copy()
+    sel[pos == 3] = False                    # 角点段不入"空前首段"桶 (§5.4 语义 = 4 键首段)
+    print("\n=== README 实证数字 (复用部署 B4b 掩码与段表, 零额外训练) ===")
+    rows54 = defaultdict(lambda: defaultdict(list))
+    for i in np.where(sel)[0]:
+        rows54[ptype(LETTERS[da[i]], LETTERS[db[i]])]["空前" if pos[i] == 0 else "有前键"].append(dtgt[i])
+    print("[§5.4 类型×前键] 段间隔中位 ms — 空前=词首段(静止启动) vs 有前键=词中段(手不回位), 差=前键条件效应")
+    print(f"  {'类型':8s} {'空前(首段)':>10s} {'有前键':>8s} {'差':>7s}")
+    for t in ("跨手", "同手异指", "同键重复", "同指异键"):
+        m0 = np.median(rows54[t]["空前"]); m1 = np.median(rows54[t]["有前键"])
+        print(f"  {t:8s} {m0:10.0f} {m1:8.0f} {m1-m0:+7.0f}   (n={len(rows54[t]['空前'])}/{len(rows54[t]['有前键'])})")
+    v0 = [v for t in rows54 for v in rows54[t]["空前"]]
+    v1 = [v for t in rows54 for v in rows54[t]["有前键"]]
+    print(f"  {'混合平均':8s} {np.median(v0):10.0f} {np.median(v1):8.0f} {np.median(v1)-np.median(v0):+7.0f}")
+
+    by_t = defaultdict(list)
+    for i in np.where(sel)[0]:
+        by_t[ptype(LETTERS[da[i]], LETTERS[db[i]])].append(dtgt[i])
+    print("[键对难度参考] 同口径全段中位 ms (§5.5 末行): " + " < ".join(
+        f"{t} {np.median(v):.0f}" for t, v in sorted(
+            ((t, by_t[t]) for t in ("跨手", "同键重复", "同手异指", "同指异键")),
+            key=lambda kv: np.median(kv[1]))))
+
+    print("[模型视角] 部署表 S(∅,x,y) vs mean_p S(p,x,y) ms — 差=同键对『角点→有前键』的模型内抬升 (§5.4 末段)")
+    for x, y in (("f", "i"), ("w", "v"), ("a", "z"), ("a", "a")):
+        i, j = KEY_TO_IDX[x], KEY_TO_IDX[y]
+        corner = float(F[EMPTY, i, j, EMPTY]); withprev = float(np.mean(F[:30, i, j, :]))
+        print(f"  {x}{y}: 角点 {corner:.0f} vs 有前键均值 {withprev:.0f}  差 {withprev-corner:+.0f}")
+
+    print("[排序扭曲] 两键累加 vs 条件 T₄ (随机 2 万码) — 两键表不可修的结构性错位实证 (§5.4 末段)")
+    rng = np.random.RandomState(7)
+    codes = rng.randint(0, 30, size=(20000, 4))
+    B = F[EMPTY, :, :, EMPTY]
+    t4c = np.array([F[EMPTY, c, d, e] + F[c, d, e, g_] + F[d, e, g_, EMPTY] for c, d, e, g_ in codes])
+    t4t = np.array([B[c, d] + B[d, e] + B[e, g_] for c, d, e, g_ in codes])
+    sp, _ = spearmanr(t4c, t4t)
+    i1, i2 = rng.randint(0, 20000, 200000), rng.randint(0, 20000, 200000)
+    m = i1 != i2
+    dc, dt = t4c[i1[m]] - t4c[i2[m]], t4t[i1[m]] - t4t[i2[m]]
+    nz = (dc != 0) & (dt != 0)
+    print(f"  Spearman {sp:.4f}  不一致码对 {np.mean(np.sign(dc[nz]) != np.sign(dt[nz]))*100:.1f}%  "
+          f"两键累加低估占比 {np.mean((t4t - t4c) < 0)*100:.1f}%")
+
+    print("[§6.1 rollover] 释时全>0 无偏口径 — 重叠%=释时晚于后键按下 (串行假设的实证边界)")
+    n_rows = 0; cnt = [0, 0, 0]; ov = [[], [], []]
+    with open(DATA_TSV, encoding="utf-8") as fh:
+        hdr = {h: i for i, h in enumerate(fh.readline().rstrip("\n").split("\t"))}
+        for line in fh:
+            row = line.rstrip("\n").split("\t")
+            if len(row) < 12 or row[8] != "0" or len(row[hdr["code"]]) != 4:
+                continue
+            try:
+                bd, cd, dd = float(row[hdr["b_d"]]), float(row[hdr["c_d"]]), float(row[hdr["d_d"]])
+                au, bu, cu, du = (float(row[hdr[c_]]) for c_ in ("a_u", "b_u", "c_u", "d_u"))
+            except ValueError:
+                continue
+            if min(au, bu, cu, du) <= 0:
+                continue
+            n_rows += 1
+            for s, (rel, press) in enumerate(((au, bd), (bu, cd), (cu, dd))):
+                if rel > press:
+                    cnt[s] += 1; ov[s].append(rel - press)
+    print(f"  样本 {n_rows} 行: " + "  ".join(
+        f"{nm} 重叠 {cnt[s]/n_rows*100:.1f}% (幅值中位 {np.median(ov[s]) if ov[s] else 0:.0f}ms)"
+        for s, nm in ((0, "首段"), (1, "中段"), (2, "尾段"))))
 
 # ═══════════════════ 主流程 ═══════════════════
 
@@ -808,6 +893,7 @@ def main():
     dprev, da, db, dn, dph, dtgt = build_tensors(deploy_all)
     dkeep, _ = residual_filter_segments(deploy_all, dprev, da, db, dn, dph, dtgt)
     print(f"全数据 B4b: 保留 {int(dkeep.sum())}/{len(dtgt)} 段  (稳定期全量, 4键+2键角点)")
+    ev_arrays = (dprev, da, db, dn, dph, dtgt, dkeep)   # README 实证块复用 (未过滤布局 + 掩码)
     dprev, da, db, dn, dph, dtgt = dprev[dkeep], da[dkeep], db[dkeep], dn[dkeep], dph[dkeep], dtgt[dkeep]
     douts = train_members([(s, dprev, da, db, dn, dph, dtgt) for s in BlendModel.SEEDS])
     for s, (_, seg_mae, va_mae) in zip(BlendModel.SEEDS, douts):
@@ -818,7 +904,9 @@ def main():
     ART_DIR.mkdir(exist_ok=True)
     deploy_m.save(str(MODEL_PT), str(MODEL_XGB))
     print(f"  模型 → 产物/keystroke_model.pt (deep2×5 权重) + 产物/击键模型-xgb.json (XGB 分量; 与 v2 权重不兼容)")
-    export_seg_table(deploy_m, str(SEG_NPZ))
+    F = build_seg_table(deploy_m)
+    export_seg_table(deploy_m, str(SEG_NPZ), F)
+    readme_evidence(deploy_all, *ev_arrays, F)
 
 
 if __name__ == "__main__":
