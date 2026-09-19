@@ -14,7 +14,7 @@
       键对记 ok (旧版把错键对同时记 ok+err, 双重计数 623 条, 已修); 首键即错不记
       事件 (键对未尝试)。仍用全部数据 (含练习期, 用户决策——错误事件稀疏)。
 
-用法: python 分析-错误率规律.py [数据.tsv] [--dual]
+用法: python 分析-错误率.py [数据.tsv] [--dual]
 """
 import sys, csv
 from collections import Counter
@@ -24,7 +24,13 @@ from scipy.stats import norm
 
 _DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(_DIR))
-from 击键模型 import LETTERS, LETTER_TO_COL, LETTER_TO_ROW, COL_TO_FINGER, COL_TO_HAND
+import importlib
+_kj = importlib.import_module("分析-按键时间")
+LETTERS = _kj.LETTERS
+LETTER_TO_COL = _kj.LETTER_TO_COL
+LETTER_TO_ROW = _kj.LETTER_TO_ROW
+COL_TO_FINGER = _kj.COL_TO_FINGER
+COL_TO_HAND = _kj.COL_TO_HAND
 
 PATH = sys.argv[1] if len(sys.argv) > 1 and not sys.argv[1].startswith("--") else str(_DIR / "数据" / "击键测速数据.tsv")
 DUAL = "--dual" in sys.argv  # 双向计数: 错按键对 (目标首键,实际错键) 同记 (2026-08-10 实验)
@@ -250,7 +256,7 @@ for ab_ in ["ab", "fg", "aa", "sz"]:
     print(f"  {ab_}: 公式 P_err={pf:.4f}  模型={pm:.4f}  ({'✓' if abs(pf-pm)<1e-6 else '✗'})")
 
 # ── 4. 导出: 900 键对 × 4 签名类 ─────────────────────
-print("\n=== 导出 当量-键对错误率.txt (900 键对 × 4 签名类) ===")
+print("\n=== 导出 键对错误率表.txt (900 键对 × 4 签名类) ===")
 pairs = [(a, b) for a in LETTERS for b in LETTERS]
 Xp9 = np.array([[f(a, b) for f in FEATS_F] for a, b in pairs], dtype=float)
 base900 = base0 + Xp9 @ w_raw
@@ -258,22 +264,22 @@ sig = lambda z: 1 / (1 + np.exp(-z))
 P00, P01 = sig(base900), sig(base900 + beta)
 P10, P11 = sig(base900 + alpha), sig(base900 + alpha + beta + gamma)
 (_DIR / "产物").mkdir(exist_ok=True)
-with open(_DIR / "产物" / "当量-键对错误率.txt", "w", encoding="utf-8") as f:
+with open(_DIR / "产物" / "键对错误率表.txt", "w", encoding="utf-8") as f:
     f.write("pair\terr_p0n0\terr_p0n1\terr_p1n0\terr_p1n1\n")
     for (a, b), v00, v01, v10, v11 in zip(pairs, P00, P01, P10, P11):
         f.write(f"{a}{b}\t{v00:.4f}\t{v01:.4f}\t{v10:.4f}\t{v11:.4f}\n")
-print(f"  已导出 当量-键对错误率.txt (列: 角点/首段/尾段/中段, p=有前键 n=有后键)")
+print(f"  已导出 键对错误率表.txt (列: 角点/首段/尾段/中段, p=有前键 n=有后键)")
 print(f"  类均值 P_err: 角点 {P00.mean()*100:.2f}% / 首段 {P01.mean()*100:.2f}% / "
       f"尾段 {P10.mean()*100:.2f}% / 中段 {P11.mean()*100:.2f}%")
 try:
     _ec = None
-    for l in (_DIR / "产物" / "错误成本-实测值.txt").read_text(encoding="utf-8").splitlines():
+    for l in (_DIR / "产物" / "错误修正时间-实测值.txt").read_text(encoding="utf-8").splitlines():
         if l.startswith("cost_ms\t"):
             _ec = float(l.split("\t")[1]); break
-    print(f"  平均错误成本 (×实测 {_ec:.0f}ms, 来源 产物/错误成本-实测值.txt): "
+    print(f"  平均错误成本 (×实测 {_ec:.0f}ms, 来源 产物/错误修正时间-实测值.txt): "
           f"T₂ = {_ec*P00.mean():.2f}ms | T₃ = {_ec*(P01+P10).mean():.2f}ms | T₄ = {_ec*(P01+P11+P10).mean():.2f}ms")
 except Exception:
-    print("  平均错误成本: 未找到 产物/错误成本-实测值.txt (先跑 分析-错误成本.py)")
+    print("  平均错误成本: 未找到 产物/错误修正时间-实测值.txt (先跑 分析-错误修正时间.py)")
 k = max(range(900), key=lambda i: P11[i])
 print(f"  极值键对: {pairs[k][0]}{pairs[k][1]} 角点 {P00[k]*100:.1f}% / 尾段 {P10[k]*100:.1f}% / 中段 {P11[k]*100:.1f}%")
 
@@ -281,7 +287,7 @@ print(f"  极值键对: {pairs[k][0]}{pairs[k][1]} 角点 {P00[k]*100:.1f}% / �
 # 类盲 = 同特征集但无签名项的逻辑回归; 差异 = 位置信息缺失对 T₂ 角点条目的系统性高估
 _ec2 = None
 try:
-    for l in (_DIR / "产物" / "错误成本-实测值.txt").read_text(encoding="utf-8").splitlines():
+    for l in (_DIR / "产物" / "错误修正时间-实测值.txt").read_text(encoding="utf-8").splitlines():
         if l.startswith("cost_ms\t"):
             _ec2 = float(l.split("\t")[1]); break
 except OSError:
@@ -299,4 +305,4 @@ if _ec2:
     print(f"  平均错误成本: 类盲 T₂ {_ec2*P_bl.mean():.1f} / T₃ {2*_ec2*P_bl.mean():.1f} / T₄ {3*_ec2*P_bl.mean():.1f}"
           f"   签名 T₂ {_ec2*P00.mean():.1f} / T₃ {_ec2*(P01+P10).mean():.1f} / T₄ {_ec2*(P01+P11+P10).mean():.1f}")
 else:
-    print("\n(未找到 产物/错误成本-实测值.txt, 跳过 §5.5 类盲对比)")
+    print("\n(未找到 产物/错误修正时间-实测值.txt, 跳过 §5.5 类盲对比)")
