@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-错误成本分析 — 聚合 数据/错误成本-错误键.tsv (2026-09-05)
+错误修正时间分析 — 聚合 数据/错误修正时间-错误键.tsv (2026-09-05)
 
-episode 判定唯一源 = 采集-错误成本.py (实时判定, 只落盘错误键事件 + 每串汇总行;
+episode 判定唯一源 = 采集-错误修正时间.py (实时判定, 只落盘错误键事件 + 每串汇总行;
 连锁错(含同位二次错)在采集端吸收为单事件——错误只计首错、时长只记首错间隔, 用户决策 2026-09-05);
 本脚本只做聚合: 全体/立即发现/延迟发现均值、盲打长度分布、连续模式按错率
 (对标停止范式 P_err 的 regime 差异)、时长异常剔除 (09-13: 过程分桶 imm×nbs档, 桶内单侧
@@ -23,7 +23,7 @@ blind/n_bs/immediate); kind=sum 行 = 串汇总 (pos=总按键, t_ms=串时长, 
 n_wrong=假警报退格, blind=截断 episode 数)。
 样本量判据: 目标 ~150-200 episode (SD≈500ms 时 SE≤50ms)。
 
-用法: python 分析-错误成本.py [记录.tsv] [--discard N]   # 记录默认 数据/错误成本-错误键.tsv;
+用法: python 分析-错误修正时间.py [记录.tsv] [--discard N]   # 记录默认 数据/错误修正时间-错误键.tsv;
       N=丢弃前 N 次按键 (熟悉期, 默认 684=首坐姿全部按键, 09-06 序号口径标定; 0=不弃)
       弃置与分组均按累计按键序号——session 字段仅采集端存档, 不参与分析 (09-06 用户决策)。
 """
@@ -33,7 +33,7 @@ from pathlib import Path
 from collections import defaultdict
 
 _DIR = Path(__file__).resolve().parent
-RAW = _DIR / "数据" / "错误成本-错误键.tsv"
+RAW = _DIR / "数据" / "错误修正时间-错误键.tsv"
 DISCARD = 684          # 丢弃前 N 次按键 (熟悉期; 684=首坐姿全部按键, 09-06 序号口径标定)
 args = sys.argv[1:]
 if "--discard" in args:
@@ -257,7 +257,7 @@ print(f"\n样本量: {len(episodes_ok)}/150 目标 (剔异常后; 闭合共 {len
 # 立即 683), 立即基元无 imm/delayed 构成混杂; 基元内控全局序号 (练习) 的 OLS:
 # dur ~ 1 + 序号(居中) + 左手。差值信噪比 |t|≥1 时手别诊断有效; 练习漂移双手同步 →
 # 差值对漂移免疫 (09-14 前后半 +69/+78 稳定)。
-LEFT_KEYS = frozenset("qwertasdfgzxcvb")   # QWERTY 左手 15 键 (物理布局; 与 击键模型.py COL_TO_HAND 对拍一致)
+LEFT_KEYS = frozenset("qwertasdfgzxcvb")   # QWERTY 左手 15 键 (物理布局; 与 分析-按键时间.py COL_TO_HAND 对拍一致)
 bim = [e for e in episodes_ok if e["imm"] and e["nbs"] == 1]
 nb = len(bim)
 mu_bim = sum(e["dur"] for e in bim) / nb if nb else 0.0
@@ -297,15 +297,15 @@ print(f"\n手别系数 (诊断, 不入表——09-15 回退标量; 立即基元 
       + (f"因子 {FACTOR_L:.4f}/{FACTOR_R:.4f} (仅记录)" if FACTOR_L
          else "|t|<1, 手别差异信噪比不足"))
 
-# ── 导出实测值 (组装当量表.py 的错误成本来源; 2026-09-06 起替代固定 500ms, 随采集动态更新;
+# ── 导出实测值 (组装当量表.py 的错误修正时间来源; 2026-09-06 起替代固定 500ms, 随采集动态更新;
 #    2026-09-14 起含手别行, 用户决策: 忽略连续文本 vs 4键限长文本的错误时间 regime 差异) ──
-OUT_COST = _DIR / "产物" / "错误成本-实测值.txt"
+OUT_COST = _DIR / "产物" / "错误修正时间-实测值.txt"
 OUT_COST.parent.mkdir(exist_ok=True)
 if durs:
     m = sum(durs) / len(durs)
     sd = math.sqrt(sum((x - m) ** 2 for x in durs) / (len(durs) - 1)) if len(durs) > 1 else 0.0
     with open(OUT_COST, "w", encoding="utf-8") as f:
-        f.write("# 错误成本实测值 (分析-错误成本.py 自动导出; 组装当量表.py / 分析-错误率规律.py 读取)\n")
+        f.write("# 错误修正时间实测值 (分析-错误修正时间.py 自动导出; 组装当量表.py / 分析-错误率.py 读取)\n")
         f.write(f"# 口径: 全体闭合 episode 均值 (净成本), 弃置前 {DISCARD} 按键, 连锁错吸收单事件\n")
         f.write(f"# 时长异常剔除: 过程分桶 (发现型×退格数档) 桶内单侧 med+3×1.4826×MAD 围栏, "
                 f"本次剔 {len(outliers)} 条 (桶 n<8 不设栏); 率统计仍用全部闭合 episode\n")
@@ -316,5 +316,5 @@ if durs:
             f.write(f"cost_left\t{m * FACTOR_L:.1f}\t{len(lv)}\tfactor {FACTOR_L:.4f}\n")
             f.write(f"cost_right\t{m * FACTOR_R:.1f}\t{len(rv)}\tfactor {FACTOR_R:.4f}\n")
             f.write(f"hand_beta\t{hand_beta:.1f}\t{hand_se:.1f}\tt {hand_t:+.2f}\tn_base {nb}\n")
-    print(f"导出实测值 → 产物/错误成本-实测值.txt (cost={m:.1f}ms, n={len(durs)}"
+    print(f"导出实测值 → 产物/错误修正时间-实测值.txt (cost={m:.1f}ms, n={len(durs)}"
           + (f"; 手别 {m*FACTOR_L:.1f}/{m*FACTOR_R:.1f}ms" if FACTOR_L else "; 手别未启用") + ")")

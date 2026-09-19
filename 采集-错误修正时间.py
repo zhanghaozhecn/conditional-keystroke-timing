@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-错误成本采集 — 连续长随机串 + 自然回退纠错 (2026-09-05)
-目的: 实测当量修正项的错误成本 (现行 500ms 为经验取整; 停止范式分解 ~455ms 只覆盖立即发现)。
+错误修正时间采集 — 连续长随机串 + 自然回退纠错 (2026-09-05)
+目的: 实测当量修正项的错误修正时间 (现行 500ms 为经验取整; 停止范式分解 ~455ms 只覆盖立即发现)。
 
 测量定义 (净成本语义, README §4.7/§5.5): 从首错按下 → 首错位置的正确字母被按下
   (位置正确——盲打字母中出现的同字母不算); 盲打字母/多次回退/过位回退均含在内。
@@ -16,7 +16,7 @@
   计入事件数但永远无时长=截断), 完成后随机暂停 (800-1500ms) 进入下一串。
 
 记录 (2026-09-05 定稿, 用户决策"只记录错误键"): episode 判定在本工具实时完成,
-  仅落盘错误事件 + 每串一行汇总 → 数据/错误成本-错误键.tsv
+  仅落盘错误事件 + 每串一行汇总 → 数据/错误修正时间-错误键.tsv
   列: session/stream/kind/pos/t_ms/dur_ms/got/want/prev/n_wrong/blind/n_bs/immediate
     kind=ep : pos=首错位置, t_ms=episode 起始(串内相对), dur_ms=首错间隔时长, got=首错
               实按键, want=目标键, prev=前键(pos=0 记"-"), n_wrong=episode 内错按次数
@@ -25,7 +25,7 @@
     kind=sum: 串汇总, pos=总按键, t_ms=串时长, dur_ms=错误事件数(只计首错),
               n_wrong=假警报退格数, blind=串尾未闭合(截断)episode 数
   (初版无反馈显示下的试采数据 2026-09-05 已删除——5 错 4 截断, 该口径不可用)
-分析: 分析-错误成本.py 只做聚合统计 (episode 判定唯一源 = 本工具)。
+分析: 分析-错误修正时间.py 只做聚合统计 (episode 判定唯一源 = 本工具)。
 反馈 (2026-09-06): 状态栏实时显示 本次打开已采集错误 episode 数 (episode 闭合写入即 +1,
   中途退出的截断 episode 不计) + 当前串速度 = 正确字母按键数 / 自本串首键累计时长
   (错按/退格不计字母但耗时计入 → 有效吞吐口径; ≥5 个正确字母起显示)。
@@ -34,7 +34,7 @@ import sys, time, random
 from pathlib import Path
 import tkinter as tk
 
-OUT = Path(__file__).resolve().parent / "数据" / "错误成本-错误键.tsv"
+OUT = Path(__file__).resolve().parent / "数据" / "错误修正时间-错误键.tsv"
 LETTERS = 'abcdefghijklmnopqrstuvwxyz;,./'  # 30 键 (与主采集一致)
 STREAM_LEN = (120, 200)   # 每串字母数随机区间
 PAUSE = (800, 1500)       # 串间暂停 ms
@@ -50,7 +50,7 @@ def _wrap(s):
 class CostCollector:
     def __init__(self):
         self.root = tk.Tk()
-        self.root.title("错误成本采集（连续输入 + 回退纠错）")
+        self.root.title("错误修正时间采集（连续输入 + 回退纠错）")
         self.root.geometry("980x600")
         self.root.configure(bg="#1e1e1e")
         self.root.protocol("WM_DELETE_WINDOW", self._finish)

@@ -2,7 +2,7 @@
 """
 条件击键当量模型（v3 混合部署模型）
   研究阶段（默认）: 训练段模型 + 报告总时间 MAE/R²
-  完成阶段 --full: 追加导出部署模型 (全数据) 与 4-D 段当量母表 (npz)
+  完成阶段 --full: 追加导出部署模型 (全数据) 与 4-D 按键时间母表 (npz)
 
 段定义: t = S(p,a,b,n) — 前两键 p,a + 当前键对 a,b + **后继键 n** (v2, 2026-08-29,
 实验-后键条件系列, 结论已存档)。n=∅(索引 30) 表无后继 (词末"甩出")。
@@ -22,12 +22,12 @@
   四键当量  T₄(abcd) = S(∅,a,b,c) + S(a,b,c,d) + S(b,c,d,∅)
 
 键位嵌入: e_k = E[k] ∈ ℝ²⁰ (30 键各独立, 索引 30 = ∅ 前键/后键)
-导出 (2026-09-05 起入 产物/): 当量-段表.npz — F[p,a,b,n] 形状 (31,30,30,31), p/n 维 0-29=键、30=∅,
-  附 letters/empty/version 元数据; 组装当量表.py / 组装-chai当量表.py 查表组合。
-  模型: keystroke_model.pt (deep2×5 权重) + 击键模型-xgb.json (XGB 分量)。
+导出 (2026-09-05 起入 产物/): 按键时间表.npz — 按键时间 F[p,a,b,n] 形状 (31,30,30,31), p/n 维 0-29=键、30=∅,
+  附 letters/empty/version 元数据; 组装当量表.py 查表组合 (段当量 = 按键时间 + 错误率×错误修正时间)。
+  模型: 按键时间模型-神经.pt (deep2×5 权重) + 按键时间模型-xgb.json (XGB 分量)。
 README 实证数字 (2026-09-18 起随 --full 输出, readme_evidence): §5.4 类型×前键 / 键对难度 /
   模型视角 / 排序扭曲 / §6.1 rollover — 原 实验-README数字刷新.py 并入删除 (同 §5.3 内嵌演进);
-  §5.5 签名vs类盲随 分析-错误率规律.py 输出。
+  §5.5 签名vs类盲随 分析-错误率.py 输出。
 """
 import argparse, os, sys, numpy as np, torch, torch.nn as nn, torch.nn.functional as F
 from pathlib import Path
@@ -114,7 +114,7 @@ def _precompute_phi():
     - 逐特征 LOO 全部持平 (实验-特征消融.py, 2026-08-11, Δ<0.2ms) — φ 特征间互为冗余
     - 整体删除 +1.7ms/角点 +3.2ms (09-14 当前数据复测, 实验-架构对比3.py no_phi;
       原 2026-08-14 结构消融同值) — φ 作为整体
-      提供嵌入补不上的几何先验, 价值在稀疏三元组外推 (2/3 段表条目零样本); LOO 在
+      提供嵌入补不上的几何先验, 价值在稀疏三元组外推 (2/3 按键时间表条目零样本); LOO 在
       训练分布内做所以测不出。保留 φ 有实证支撑 (结构消融已删, 结论存档)"""
     feats = {}
     for a in LETTERS:
@@ -329,13 +329,13 @@ class BlendModel:
 _DIR      = Path(__file__).resolve().parent
 DATA_TSV  = _DIR / "数据" / "击键测速数据.tsv"
 ART_DIR   = _DIR / "产物"                 # 全部计算产物 (导出方负责 mkdir)
-SEG_NPZ   = ART_DIR / "当量-段表.npz"      # 原始段母表 (本文件 --full 导出)
-ERR_TXT   = ART_DIR / "当量-键对错误率.txt" # 错误率表 (分析-错误率规律.py 导出)
+SEG_NPZ   = ART_DIR / "按键时间表.npz"      # 按键时间母表 (本文件 --full 导出)
+ERR_TXT   = ART_DIR / "键对错误率表.txt" # 键对错误率表 (分析-错误率.py 导出)
 CHEN_TXT  = _DIR / "数据" / "陈一凡当量表.txt"  # 陈表对比数据 (键对\t当量, 随仓库分发)
-CORR_NPZ  = ART_DIR / "当量-修正段表.npz"  # 修正段表 (组装当量表.py)
-T24_TXT   = ART_DIR / "当量-2-4键.txt"     # 2-4 键总当量 (组装当量表.py)
-MODEL_PT  = ART_DIR / "keystroke_model.pt"
-MODEL_XGB = ART_DIR / "击键模型-xgb.json"
+CORR_NPZ  = ART_DIR / "段当量表.npz"  # 段当量表 (组装当量表.py)
+T24_TXT   = ART_DIR / "总当量-2-4键.txt"     # 2/3/4 键总当量 (组装当量表.py)
+MODEL_PT  = ART_DIR / "按键时间模型-神经.pt"
+MODEL_XGB = ART_DIR / "按键时间模型-xgb.json"
 
 def load_data(path):
     """[(code, [b_d,c_d,d_d]), ...]  error=0, 仅格式/有效性校验 (异常剔除在段级)。
@@ -362,7 +362,9 @@ def load_trials(path):
     采集端存档字段; 依据 实验/实验-序号趋势对比.py: 两种口径边界互证一致, session 内无热身
     效应 → 边界不携带状态信息)。
     返回 rows: [(code, times)] 文件顺序; 4 键 times=[b_d,c_d,d_d] (均自首键按下累计,
-    d_d=trial 总时), 2 键 [b_d] (T₂ 角点数据, 08-31 起参与训练)。过滤同 08-31 版。"""
+    d_d=trial 总时), 2 键 [b_d] (T₂ 角点数据, 08-31 起参与训练), 3 键 [b_d,c_d]
+    (09-19 补采透传, d_d=0; 稳定期分码长边界已覆盖, 时间模型接入待 (码长,位置) 重参数化)。
+    过滤同 08-31 版。"""
     rows = []
     with open(path, encoding="utf-8") as f:
         hdr = {h: i for i, h in enumerate(f.readline().rstrip("\n").split("\t"))}
@@ -381,59 +383,91 @@ def load_trials(path):
                 if bd <= 0 or cd <= bd or dd <= cd:
                     continue
                 rows.append((code, [bd, cd, dd]))
+            elif len(code) == 3:
+                if bd <= 0 or cd <= bd:
+                    continue
+                rows.append((code, [bd, cd]))
             elif len(code) == 2:
                 if bd <= 0:
                     continue
                 rows.append((code, [bd]))
     return rows
 
-def stable_pools(path, block=150, band=1.10, ref_last=5, smooth=3, min_blocks=8):
-    """稳定期标准划分 — 序号块口径 (2026-09-06 用户决策; 由 08-30/08-31 session 版平移,
-    2 键角点数据参与训练的决策不变)。
-    边界方法 (确定性, 无随机): 4 键 trial 按时间序切等大块 (block=150 ≈ session 中位规模
-    169) → 每块 trial 总时 (d_d) 中位 → smooth=3 块滚动中位 → R=末 ref_last 平滑值中位
-    → 自末向前最早连续满足 ≤R×band 的块起为稳定期。2 键 trial 不参与边界计算, 按时间序
-    自稳定起点 trial 同截归属 (原"按同 session 归属"的序号化等价物)。
-    划分: 稳定期 4 键与 2 键各自 RandomState(2024) 顺序 permutation 80/20
-    (先 4 键后 2 键, 固定顺序)。返回 dict:
-      train_all  训练池 = train4 + 角点段源 train2 (拼接顺序固定, 四入口共用保同流)
-      test4 / test2 / train4 / train2 / deploy4 / deploy2 (deploy=稳定期全量) / desc
-    依据: 角点 S(∅,a,b,∅) 原为零样本外推 (实测偏差 −6.0±0.8ms), 2 键参与训练使其
-    内插化; 模型结构共享使稀疏覆盖 (n=1) 也被整体统计强度正则化。"""
-    rows = load_trials(path)
-    idx4 = [i for i, (c, _) in enumerate(rows) if len(c) == 4]
-    tot4 = [rows[i][1][2] for i in idx4]               # d_d = trial 总时
-    nb = -(-len(tot4) // block)                        # 块数 (尾块可小, 同旧版尾 session 可小)
-    med = np.array([np.median(tot4[b * block:(b + 1) * block]) for b in range(nb)])
+def _block_boundary(tots, block, band, ref_last, smooth):
+    """单码长序号块边界: ok trial 总时时间序 → (起始块 k, R, 块数 nb)。
+    k=None: 块数<2 (数据不足, R 不可估); k==nb: 末块即超带 (退化, 稳定期空)。
+    方法: 块总时中位 → smooth 块滚动中位 → R=末 ref_last 平滑值中位 →
+    自末向前最早连续 ≤R×band 的块起 (确定性无随机)。"""
+    nb = -(-len(tots) // block)
+    if nb < 2:
+        return None, None, nb
+    med = np.array([np.median(tots[b * block:(b + 1) * block]) for b in range(nb)])
     sm = np.array([np.median(med[max(0, i - smooth + 1):i + 1]) for i in range(nb)])
     R = float(np.median(sm[-ref_last:]))
     k = nb
     while k - 1 >= 0 and sm[k - 1] <= R * band:
         k -= 1
-    if k >= nb:                                        # 末块即超带 (退化, 同旧版空稳定期)
-        g0, stable4, stable2 = len(rows), [], []
-    else:
-        g0 = idx4[k * block]                           # 稳定期首 trial 的全局 ok 行号 (混合序锚点)
-        stable = rows[g0:]
-        stable4 = [(c, t) for c, t in stable if len(c) == 4]
-        stable2 = [(c, t) for c, t in stable if len(c) == 2]
-    n_st = nb - k
-    warn = f"  ⚠ 稳定期仅 {n_st} 块 (< {min_blocks}), 样本偏少" if n_st < min_blocks else ""
+    return k, R, nb
+
+
+def stable_pools(path, block=150, band=1.10, ref_last=5, smooth=3, min_blocks=8):
+    """稳定期标准划分 — 分码长序号块口径 (2026-09-19 用户决策: 三种码长入队时间不同、
+    练习轨迹各自独立 (实验-分码长练习趋势.py: 2键全程无趋势/3键单 session), 稳定期按码长
+    分别计算各自截取; 旧"4键边界+同截归属"对 2键恰巧等价——2键入队晚于 4键边界且自身无
+    趋势, 其边界自然回溯至块 0 → train4/train2/test4/test2 内容与旧版逐位一致, 已验证)。
+    每码长 (4键 d_d / 2键 b_d / 3键 c_d): ok trial 按时间序切 block 等大块 → 块中位 →
+    smooth 滚动中位 → R=末 ref_last 中位 → 自末向前最早连续 ≤R×band 的块起。
+    稳定块数 < min_blocks 的码长照常截取并告警 (如积累中的 3 键: 边界随数据自动收紧)。
+    划分: 各码长稳定期分别 RandomState(2024) 顺序 permutation 80/20 (先 4 后 2 后 3,
+    固定顺序 → 4/2 键随机流与旧版一致)。返回 dict:
+      train_all  训练池 = train4 + train2 (拼接顺序固定; 3键管线落地前不进时间模型)
+      train4/test4/train2/test2/train3/test3  各码长 train/test (3键现暂全保留)
+      deploy4/deploy2/deploy3  各码长稳定期全量 (部署 = 当前状态语义)
+      desc  划分说明 (含各码长边界/R/告警)
+    依据: 角点 S(∅,a,b,∅) 原为零样本外推 (实测偏差 −6.0±0.8ms), 2 键参与训练使其
+    内插化; 模型结构共享使稀疏覆盖 (n=1) 也被整体统计强度正则化。"""
+    rows = load_trials(path)
+    idx_n = {n: [i for i, (c, _) in enumerate(rows) if len(c) == n] for n in (4, 2, 3)}
+    tcol = {4: 2, 2: 0, 3: 1}          # 4键 d_d / 2键 b_d / 3键 c_d
+    bounds, Rs, nbs = {}, {}, {}
+    for n in (4, 2, 3):
+        bounds[n], Rs[n], nbs[n] = _block_boundary(
+            [rows[i][1][tcol[n]] for i in idx_n[n]], block, band, ref_last, smooth)
+    stable, warn = {}, []
+    for n in (4, 2, 3):
+        k, R, nb = bounds[n], Rs[n], nbs[n]
+        if R is None:                                   # 块数<2: 全保留
+            stable[n] = [rows[i] for i in idx_n[n]]
+        elif k >= nb:                                   # 末块超带: 稳定期空 (同旧版退化)
+            stable[n] = []
+            warn.append(f"{n}键末块超带 稳定期空")
+        else:
+            stable[n] = [rows[i] for i in idx_n[n][k * block:]]
+            if nb - k < min_blocks:
+                warn.append(f"{n}键稳定期仅 {nb - k} 块 (<{min_blocks})")
     rng = np.random.RandomState(2024)
-    i4 = rng.permutation(len(stable4)); nt4 = int(len(stable4) * .2)
-    t4set = set(i4[:nt4])
-    train4 = [d for i, d in enumerate(stable4) if i not in t4set]
-    test4  = [d for i, d in enumerate(stable4) if i in t4set]
-    i2 = rng.permutation(len(stable2)); nt2 = int(len(stable2) * .2)
-    t2set = set(i2[:nt2])
-    train2 = [d for i, d in enumerate(stable2) if i not in t2set]
-    test2  = [d for i, d in enumerate(stable2) if i in t2set]
-    desc = (f"稳定期: 序号块[{k}] (ok 行 #{g0 + 1}/{len(rows)}) 起 ({n_st}/{nb} 块×{block}, "
-            f"4键 {len(stable4)}/{len(idx4)} + 2键 {len(stable2)} trial, "
-            f"R={R:.0f}ms, 带=R×{band:.2f}){warn}")
-    return {"train_all": train4 + train2, "train4": train4, "test4": test4,
-            "train2": train2, "test2": test2,
-            "deploy4": stable4, "deploy2": stable2, "desc": desc}
+    out = {}
+    for n in (4, 2, 3):
+        i_n = rng.permutation(len(stable[n]))
+        nt_n = int(len(stable[n]) * .2)
+        t_set = set(i_n[:nt_n])
+        out[f"train{n}"] = [stable[n][i] for i in range(len(stable[n])) if i not in t_set]
+        out[f"test{n}"] = [stable[n][i] for i in range(len(stable[n])) if i in t_set]
+        out[f"deploy{n}"] = list(stable[n])
+
+    def bd_txt(n):
+        k, R, nb = bounds[n], Rs[n], nbs[n]
+        if R is None:
+            return f"{n}键 块数<2 暂全保留"
+        if k >= nb:
+            return f"{n}键 末块超带 稳定期空"
+        tag = f"({nb - k}/{nb} 块)" if nb - k < min_blocks else ("(全程)" if k == 0 else "")
+        return f"{n}键 块[{k}] (ok行 #{idx_n[n][k * block] + 1}){tag} R={R:.0f}"
+
+    desc = (f"稳定期(分码长): {' | '.join(bd_txt(n) for n in (4, 2, 3))}  "
+            f"(4键 {len(stable[4])} + 3键 {len(stable[3])} + 2键 {len(stable[2])} trial"
+            + (f"; ⚠ {'; '.join(warn)}" if warn else "") + ")")
+    return {"train_all": out["train4"] + out["train2"], "desc": desc, **out}
 
 def _seg_layout(data):
     """段槽位与 trial 归属 (混合池: 4 键 trial 3 段 slot 0/1/2, 2 键 trial 单段 slot 3=角点)。
@@ -631,7 +665,7 @@ def eval_total(model, data):
 # ═══════════════════ 导出 ═══════════════════
 
 def build_seg_table(model):
-    """4-D 段表 F[p,a,b,n] = S(p,a,b,n) ms, 形状 (31,30,30,31)。
+    """4-D 按键时间表 F[p,a,b,n] = S(p,a,b,n) ms, 形状 (31,30,30,31)。
     p/n 维 0-29 = 键, 30 = ∅ (与模型索引一致); a/b 维 0-29 = 键。
     按 p 分 31 批 (每批 30×30×31 = 27,900 行) 一次前向。"""
     n = len(LETTERS)
@@ -716,7 +750,7 @@ def chen_comparison(m, pools, test_full):
         print(f"  {name:14s}: MAE {err.mean():6.1f}ms (中位 {np.median(err):5.1f})  [{tag}]  排名 {sp:.4f}")
 
 def export_seg_table(model, out_path, F=None):
-    """4-D 段当量母表 (npz): F (31,30,30,31) float32 + 元数据。
+    """4-D 按键时间母表 (npz): F (31,30,30,31) float32 + 元数据。
     查询组合 (组装当量表.py / 组装-chai当量表.py):
       T₂(ab)   = F[∅,a,b,∅]           (角点, 2 键试次验证中)
       T₃(abc)  = F[∅,a,b,c] + F[a,b,c,∅]
@@ -728,15 +762,15 @@ def export_seg_table(model, out_path, F=None):
     np.savez_compressed(out_path, F=F,
                         letters=np.array(list(LETTERS)), empty=np.int64(EMPTY),
                         version=np.int64(2),
-                        note=np.array("S(p,a,b,n) ms 原始值; p/n 维 0-29=键 30=EMPTY; "
+                        note=np.array("按键时间 S(p,a,b,n) ms; p/n 维 0-29=键 30=EMPTY; "
                                       "T2=F[30,a,b,30] T3=F[30,a,b,c]+F[a,b,c,30] "
                                       "T4=F[30,a,b,c]+F[a,b,c,d]+F[b,c,d,30]"))
-    print(f"  当量-段表: {out_path}  (F {F.shape}, {F.size:,} 条, npz)")
+    print(f"  按键时间表: {out_path}  (F {F.shape}, {F.size:,} 条, npz)")
 
 def readme_evidence(deploy_all, dprev, da, db, dn, dph, dtgt, dkeep, F):
     """README 实证数字 (2026-09-18 起随 --full 输出; 原 实验/实验-README数字刷新.py 并入删除,
-    同 §5.3 陈表对比的"独立脚本→内嵌"演进)。复用内存中的部署池 B4b 掩码与段表 F, 零额外训练;
-    每块首行即数字意义注记, 与 README 节号对应。§5.5 签名vs类盲在 分析-错误率规律.py。"""
+    同 §5.3 陈表对比的"独立脚本→内嵌"演进)。复用内存中的部署池 B4b 掩码与按键时间表 F, 零额外训练;
+    每块首行即数字意义注记, 与 README 节号对应。§5.5 签名vs类盲在 分析-错误率.py。"""
     from collections import defaultdict
     from scipy.stats import spearmanr
 
@@ -748,7 +782,7 @@ def readme_evidence(deploy_all, dprev, da, db, dn, dph, dtgt, dkeep, F):
     pos, _ = _seg_layout(deploy_all)
     sel = dkeep.copy()
     sel[pos == 3] = False                    # 角点段不入"空前首段"桶 (§5.4 语义 = 4 键首段)
-    print("\n=== README 实证数字 (复用部署 B4b 掩码与段表, 零额外训练) ===")
+    print("\n=== README 实证数字 (复用部署 B4b 掩码与按键时间表, 零额外训练) ===")
     rows54 = defaultdict(lambda: defaultdict(list))
     for i in np.where(sel)[0]:
         rows54[ptype(LETTERS[da[i]], LETTERS[db[i]])]["空前" if pos[i] == 0 else "有前键"].append(dtgt[i])
@@ -817,7 +851,7 @@ def readme_evidence(deploy_all, dprev, da, db, dn, dph, dtgt, dkeep, F):
 def main():
     ap = argparse.ArgumentParser(description="对称击键当量模型 v3 混合: 训练 + 测试集评估 + 可选导出")
     ap.add_argument("--full", action="store_true",
-                    help="追加部署模型训练 (全数据) + 导出 4-D 段当量表 (npz) 与模型")
+                    help="追加部署模型训练 (全数据) + 导出 4-D 按键时间表 (npz) 与模型")
     args = ap.parse_args()
     full = args.full
     DATA = DATA_TSV
@@ -903,7 +937,7 @@ def main():
     print("\n=== 导出 ===")
     ART_DIR.mkdir(exist_ok=True)
     deploy_m.save(str(MODEL_PT), str(MODEL_XGB))
-    print(f"  模型 → 产物/keystroke_model.pt (deep2×5 权重) + 产物/击键模型-xgb.json (XGB 分量; 与 v2 权重不兼容)")
+    print(f"  模型 → 产物/按键时间模型-神经.pt (deep2×5 权重) + 产物/按键时间模型-xgb.json (XGB 分量; 与 v2 权重不兼容)")
     F = build_seg_table(deploy_m)
     export_seg_table(deploy_m, str(SEG_NPZ), F)
     readme_evidence(deploy_all, *ev_arrays, F)

@@ -1,13 +1,19 @@
 #!/usr/bin/env python3
 """
 击键测速工具（通用）
-- 2/4 键混采: 每试次以 P2 概率出 2 键码（其余 4 键），混入方式加权随机
+- 2/3/4 键混采: 每试次按比例 (P2, P3, 其余 4 键) 出码，混入方式加权随机
 - 多样性加权随机采样: 首键均匀随机, 后续键 w(b|a) ∝ 1/(n(a,b)+1)
   (欠样本键对优先——符号键 ;,./ 零样本时被自动补足; 样本量趋均衡后回归均匀随机;
-   4 键与 2 键各用独立键对计数池: 4 键池喂 4 键段覆盖, 2 键池喂 T₂ 角点 900 键对覆盖)
+   4/3/2 键各用独立键对计数池: 4 键池喂 4 键段覆盖, 2 键池喂 T₂ 角点 900 键对覆盖,
+   3 键池喂 T₃ 两段覆盖)
 - 2 键试次 (2026-08-29 增补, 服务对称段模型 T₂ 角点 S(∅,a,b,∅) 验证):
   记录行 code 长度 2, b_d=第 2 键时间, c_d/d_d=0 填充——下游 load_data 按 len(code)==4
   过滤, 旧流程不受影响
+- 3 键试次 (2026-09-18 补采样增补, 服务 T₃ 直采——签名错误率模型对 3 键码的外推隐患:
+  (p,n) 签名与「码长×位置」完全共线, 3键尾段曾被按 4键pos3 速率计; 兼验时间模型
+  同签名段的码长效应): 记录行 code 长度 3, b_d/c_d=第 2/3 键按下时间, d_d/d_u=0 填充——
+  3 键管线 (load_trials/build_tensors/错误率 (码长,位置) 重参数化) 落地前,
+  下游全部按 len 过滤忽略, 采集可先行
 - 第一键按下开始计时，打完自动进入下一组
 - 正确→记录数据，等末键释放后进入随机延迟
 - 输错→记录错误（含实际输入），进入随机延迟
@@ -23,13 +29,17 @@ import tkinter as tk
 
 OUT = Path(__file__).resolve().parent / "数据" / "击键测速数据.tsv"  # 2026-09-05 目录重组 + 去本机绝对路径
 LETTERS = 'abcdefghijklmnopqrstuvwxyz;,./'  # 30 键 (3 行 10 列完整 QWERTY)
-P2 = 0.30  # 2 键试次概率 (加权混入)。08-31 起回调 0.3 维持角点覆盖
-           # (角点已参与训练, 冲刺结束; 2 键数据随采集持续增密角点条目)
+# 试次类型比例 (2键:3键:4键)。
+# 设计比例 = 2:1:4 (2026-09-19 用户决策, 替代早先 3:1:6 设想): 战役结束后恢复
+#   P2, P3 = 2/7, 1/7   # 即 2键 28.6% / 3键 14.3% / 4键 57.1%
+# 当前 = 3 键补采样战役 (09-18 起): 1:7:2 —— 3 键错误事件稀疏 (~1-2%/段),
+# 70% 3 键快速积累 seg1/seg2 直观测; 3 键稳定期边界生效后回调设计比例。
+P2, P3 = 0.10, 0.70  # 2键 10% / 3键 70% / 其余 4键 20%
 
 HEADER = [
-    "code",           # 显示的编码 (4 键 trial; 08-29 起混入 2 键)
-    "b_d", "c_d", "d_d",           # 第 2/3/4 键按下时间 (ms from a_d); 2 键行 c_d/d_d=0
-    "a_u", "b_u", "c_u", "d_u",    # 第 1/2/3/4 键放开时间 (ms from a_d); 2 键行 c_u/d_u=0
+    "code",           # 显示的编码 (4 键 trial; 08-29 起混入 2 键; 09-18 起混入 3 键)
+    "b_d", "c_d", "d_d",           # 第 2/3/4 键按下时间 (ms from a_d); 2 键行 c_d/d_d=0, 3 键行 d_d=0
+    "a_u", "b_u", "c_u", "d_u",    # 第 1/2/3/4 键放开时间 (ms from a_d); 2 键行 c_u/d_u=0, 3 键行 d_u=0
     "error",          # 0=正确, 1=错误
     "actual",         # 错误时记录实际按键序列
     "trial",          # 试次序号 (1-based, session 内自增)
@@ -64,13 +74,14 @@ class SpeedTest:
         self.total_trials = 0   # 总试次（含跳过，用于 block 计数）
         self.recorded = 0       # 已记录数（正确+错误）
         self.code = ""
-        self.nkeys = 4          # 当前试次键数 (2 | 4)
+        self.nkeys = 4          # 当前试次键数 (2 | 3 | 4)
         self.events = []        # [(type, key, ts_from_t0)]
         self.t0 = 0
         self.phase = "waiting"  # waiting | typing | blocked
         self._header_written = OUT.exists()
         self.pair_counts = _load_pair_pool(OUT, 4)   # 4 键欠样本加权池
         self.pair2_counts = _load_pair_pool(OUT, 2)  # 2 键欠样本加权池 (T₂ 角点覆盖)
+        self.pair3_counts = _load_pair_pool(OUT, 3)  # 3 键欠样本加权池 (T₃ 两段覆盖)
 
         self.session_id = time.strftime("%Y%m%d-%H%M%S")
 
@@ -78,7 +89,7 @@ class SpeedTest:
         self.root.bind("<KeyRelease>", self.on_release)
 
         # --- UI ---
-        self.label_title = tk.Label(self.root, text="击键测速（2/4 字母编码）",
+        self.label_title = tk.Label(self.root, text="击键测速（2/3/4 字母编码）",
                                      font=("Consolas", 14), fg="#fff", bg="#1e1e1e")
         self.label_title.pack(pady=10)
 
@@ -121,11 +132,12 @@ class SpeedTest:
         return self.total_trials + 1
 
     def new_code(self):
-        # 混采: P2 概率 2 键 (T₂ 角点), 其余 4 键
+        # 混采: 按 (P2, P3, 其余 4 键) 比例出码
         # 多样性加权采样: 首键均匀随机, 后续键 w(b|a) ∝ 1/(n(a,b)+1)
-        # (4 键用 4 键池计数, 2 键用 2 键池计数——两池目标不同, 各自均衡)
-        self.nkeys = 2 if random.random() < P2 else 4
-        pool = self.pair2_counts if self.nkeys == 2 else self.pair_counts
+        # (4/3/2 键各用本码长独立池计数——各池覆盖目标不同, 各自均衡)
+        r = random.random()
+        self.nkeys = 2 if r < P2 else (3 if r < P2 + P3 else 4)
+        pool = {2: self.pair2_counts, 3: self.pair3_counts, 4: self.pair_counts}[self.nkeys]
         code = random.choice(LETTERS)
         for _ in range(self.nkeys - 1):
             weights = [1.0 / (pool.get(code[-1] + b, 0) + 1) for b in LETTERS]
@@ -276,8 +288,8 @@ class SpeedTest:
         ]
         with open(OUT, "a", encoding="utf-8") as f:
             f.write("\t".join(row) + "\n")
-        # 更新键对计数 (下次生成时欠样本优先; 2 键/4 键各自池)
-        pool = self.pair2_counts if self.nkeys == 2 else self.pair_counts
+        # 更新键对计数 (下次生成时欠样本优先; 2/3/4 键各自池)
+        pool = {2: self.pair2_counts, 3: self.pair3_counts, 4: self.pair_counts}[self.nkeys]
         for i in range(self.nkeys - 1):
             pool[self.code[i] + self.code[i+1]] += 1
         self.total_trials += 1
