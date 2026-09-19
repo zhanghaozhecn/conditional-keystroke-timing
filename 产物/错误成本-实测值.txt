@@ -1,4 +1,9 @@
 # 错误成本实测值 (分析-错误成本.py 自动导出; 组装当量表.py / 分析-错误率规律.py 读取)
 # 口径: 全体闭合 episode 均值 (净成本), 弃置前 684 按键, 连锁错吸收单事件
-cost_ms	n	SE_ms
-914.8	48	34.4
+# 时长异常剔除: 过程分桶 (发现型×退格数档) 桶内单侧 med+3×1.4826×MAD 围栏, 本次剔 4 条 (桶 n<8 不设栏); 率统计仍用全部闭合 episode
+# 手别: 立即基元 (imm&nbs=1) 控序号 OLS 手效应, |t|≥1 启用; cost_left/right = 标量×因子
+label	value	n	extra
+cost_ms	782.2	278	14.7
+cost_left	821.7	118	factor 1.0504
+cost_right	742.8	90	factor 0.9496
+hand_beta	68.8	16.6	t +4.15	n_base 208
