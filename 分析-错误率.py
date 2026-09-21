@@ -1,15 +1,23 @@
 #!/usr/bin/env python3
 """
-错误率规律探索 + 签名条件逻辑回归（2026-09-02 签名版）。
+错误率规律探索 + 签名×段位条件逻辑回归（2026-09-19 重参数化；2026-09-21 去交互项）。
 
-模型: P_err(a,b | 有无前键, 有无后键) = σ(w·feat9(a,b) + α·有前键 + β·有后键 + γ·前×后)
-      签名与 S(p,a,b,n) 的 (p,n) 语义统一, 角点 (0,0) 为参考电平:
-        4键 pos1→(0,1) 首段   pos2→(1,1) 中段   pos3→(1,0) 尾段   2键 pos1→(0,0) 角点
-      采纳依据 (09-14 当前数据复核, 实验/实验-错误率算法对比.py): 错误率随码内位置爬升
-      (角点 0.50 / 首段 0.98 / 中段 2.14 / 尾段 3.11%), 无上下文模型对 T₂ 角点高估;
-      交互项必需——纯加法形式角点高估 2.4× (O/E 0.41), 交互后 1.00, γ Wald p=0.004。
-      事件级 AUC 0.642→0.691 (5-fold CV)。
-事件口径 (2026-09-02 修正): 4 键 + 2 键行 (2 键行即角点 (0,0) 类, 首次参与);
+模型: P_err(a,b | 段类) = σ(w·feat(a,b) + β·有后键 + δ·(段位−1))
+      段类 = (有前键, 有后键, 段位)，共 5 类（由 码长×段位 映射）:
+        c0 角点 (∅,∅,1) 2键seg1 | c1 首段 (∅,有,1) 3/4键seg1 | c2 短尾 (有,∅,2) 3键seg2
+        c3 中段 (有,有,2) 4键seg2 | c4 长尾 (有,∅,3) 4键seg3
+      五类电平 (相对 c0 角点): c1=+β, c2=+δ, c3=+β+δ, c4=+2δ  ← **纯加法形式**
+      **交互项 γ 已删 (2026-09-21 用户决策「λ 交互现在就可以简化掉」)**: γ(有后键×段位)
+      在段类重参数化后的口径下历次都不显著 (−0.10±0.17, z=−0.58) 且判定它需 ~1276 场
+      数据 (README §5.7)、点估计 ≈0 意味其对总当量影响在第四位 → 删掉换 2 个自由度。
+      本脚本每次运行**并排报一次带 γ 的拟合** (deviance + LRT)，作为「删得对不对」的常设监控。
+      重参数化依据 (2026-09-19, 六格拟合): 旧四列签名在仅 2/4 键数据上与 (码长,段位)
+      一一对应 (无损重参数化)，加入 3 键后「尾段」类被劈为 c2/c4——实测 1.64% vs 3.15%
+      (z=−3.08, p=0.0020) → 旧模型显著拟合不足 (D=10.17→8.87, p=0.006→0.012)。
+      **「有前键」不再单列**: 观测数据里 有前键 ⟺ 段位≥2 完全共线，旧模型的
+      α=+2.10 实为位置效应——引入段位项后其系数塌缩为 0 (z=0.02)；改由
+      δ·(段位−1) 承载「码内累积负担」，β 承载「末位保护」。
+事件口径 (2026-09-02 修正, 2026-09-19 起 3 键行入模): 2/3/4 键行全部参与;
       正确 trial 每键对 1 ok 事件; 错误 trial 在错键截断——错键对记 1 err、其前的
       键对记 ok (旧版把错键对同时记 ok+err, 双重计数 623 条, 已修); 首键即错不记
       事件 (键对未尝试)。仍用全部数据 (含练习期, 用户决策——错误事件稀疏)。
@@ -86,32 +94,33 @@ NAMES_BASE = ["同手", "同指", "同指同列", "无名-中指", "小指-无�
               "同指双列", "b左小指", "b顶行", "b底行"]
 NAMES_NEW  = NAMES_BASE + ["镜像手指", "跨行同指", "相邻手指", "b靠拇指侧"]
 
-# ── 键对事件 (签名口径, 2026-09-02) ──────────────────
-# 事件 = (a, b, ok, 有前键, 有后键); 签名映射与 S(p,a,b,n) 一致
-SIG = {4: {1: (0, 1), 2: (1, 1), 3: (1, 0)},   # 4 键: pos1 首段 / pos2 中段 / pos3 尾段
-       2: {1: (0, 0)}}                          # 2 键: 角点
+# ── 键对事件 (签名×段位口径, 2026-09-19) ─────────────
+# 事件 = (a, b, ok, 段类); 段类由 (码长, 段位) 映射, 属性见 CLS_ATTR
+SEGCLS = {2: {1: 0},                 # 角点 (∅,∅,1)
+          3: {1: 1, 2: 2},           # 首段 (∅,有,1) | 短尾 (有,∅,2)
+          4: {1: 1, 2: 3, 3: 4}}     # 首段 | 中段 (有,有,2) | 长尾 (有,∅,3)
+CLS_ATTR = {0: (0, 0, 1), 1: (0, 1, 1), 2: (1, 0, 2), 3: (1, 1, 2), 4: (1, 0, 3)}  # (有前键,有后键,段位)
+CLS_NAME = {0: "角点(∅,∅,1)", 1: "首段(∅,有,1)", 2: "短尾(有,∅,2)",
+            3: "中段(有,有,2)", 4: "长尾(有,∅,3)"}
 events = []
 def add_events(code, act, ts_ok):
     L_ = len(code)
-    cls = SIG.get(L_)
+    cls = SEGCLS.get(L_)
     if cls is None: return
     if ts_ok:
         for i in range(1, L_):
-            pv, nx = cls[i]
-            events.append((code[i-1], code[i], 1, pv, nx))
+            events.append((code[i-1], code[i], 1, cls[i]))
         return
     pos = None
     for i, (c, a) in enumerate(zip(code, act)):
         if c != a: pos = i; break
     if pos is None or pos == 0: return   # 未定位 / 首键即错: 无键对事件
     for i in range(1, pos):              # 错键之前的键对 → ok (错键对只记 err, 修双重计数)
-        pv, nx = cls[i]
-        events.append((code[i-1], code[i], 1, pv, nx))
-    pv, nx = cls[pos]
-    events.append((code[pos-1], code[pos], 0, pv, nx))
-    # 双向计数 (--dual): 错按键对 (目标首键,实际错键) 同记, 签名同错键位置
+        events.append((code[i-1], code[i], 1, cls[i]))
+    events.append((code[pos-1], code[pos], 0, cls[pos]))
+    # 双向计数 (--dual): 错按键对 (目标首键,实际错键) 同记, 段类同错键位置
     if DUAL and act[pos] in LETTERS and act[pos] != code[pos]:
-        events.append((code[pos-1], act[pos], 0, pv, nx))
+        events.append((code[pos-1], act[pos], 0, cls[pos]))
 
 rows = list(csv.DictReader(open(PATH, encoding="utf-8"), delimiter="\t"))
 for r in rows:
@@ -121,16 +130,19 @@ for r in rows:
 
 N = len(events)
 POS = sum(1 for e in events if e[2] == 0)
-n2 = sum(1 for e in events if e[3] == 0 and e[4] == 0)
-e2 = sum(1 for e in events if e[3] == 0 and e[4] == 0 and e[2] == 0)
-print(f"键对事件 {N} (错误 {POS}, {POS/N*100:.2f}%)  | 其中 2 键角点类 {n2} (错误 {e2})")
+n_c = Counter(e[3] for e in events)
+e_c = Counter(e[3] for e in events if e[2] == 0)
+print(f"键对事件 {N} (错误 {POS}, {POS/N*100:.2f}%) — 段类分布:")
+for c_ in range(5):
+    print(f"  c{c_} {CLS_NAME[c_]:14s} n={n_c[c_]:6d}  错误 {e_c[c_]:4d}  "
+          f"= {e_c[c_]/max(n_c[c_], 1)*100:.3f}%")
 
 # ── 1. 探索: 错误率 × 特征分层 (签名混合口径) ─────────
 def layer_rate(feat_fn, name, groups):
     """feat_fn: (a,b)->group key; groups: 组名列表"""
     print(f"\n[{name}]")
     cnt = Counter(); err = Counter()
-    for a, b, ok, _, _ in events:
+    for a, b, ok, _ in events:
         g = feat_fn(a, b)
         cnt[g] += 1
         if not ok: err[g] += 1
@@ -175,10 +187,10 @@ from sklearn.metrics import roc_auc_score
 def feats(a, b, fs):
     return [1.0] + [f(a, b) for f in fs]
 
-Y = np.array([1.0 if ok else 0.0 for _, _, ok, _, _ in events], dtype=np.float32)  # 1=正确
+Y = np.array([1.0 if ok else 0.0 for _, _, ok, _ in events], dtype=np.float32)  # 1=正确
 
 def fit_and_eval(fs, label):
-    X = np.array([feats(a, b, fs) for a, b, _, _, _ in events], dtype=np.float32)
+    X = np.array([feats(a, b, fs) for a, b, _, _ in events], dtype=np.float32)
     mu, sd = X[:, 1:].mean(0), X[:, 1:].std(0) + 1e-6
     Xs = np.concatenate([X[:, :1], (X[:, 1:] - mu) / sd], axis=1)
     aucs = []
@@ -200,17 +212,19 @@ else:
     FEATS_F, NAMES_F = FEATS_BASE, NAMES_BASE
     print(f"  → 保留 9 特征基线 (AUC {auc_base:.3f} ≥ 扩充 {auc_new:.3f})")
 
-# ── 3. 最终模型: feat9 + 签名特征 (α/β/γ, IRLS + Wald) ──
-print("\n=== 签名条件模型: P_err = σ(w·feat + α·有前键 + β·有后键 + γ·前×后) ===")
+# ── 3. 最终模型: feat + 签名×段位 加法形式 (β/δ, IRLS + Wald) ──
+print("\n=== 签名×段位条件模型（加法）: P_err = σ(w·feat + β·有后键 + δ·(段位−1)) ===")
 Yerr = 1.0 - Y                                   # 1=错误
-PV = np.array([e[3] for e in events], dtype=float)
-NX = np.array([e[4] for e in events], dtype=float)
+CL = np.array([e[3] for e in events], dtype=int)
+PV = np.array([CLS_ATTR[c_][0] for c_ in CL], dtype=float)        # 有前键 (与 段位≥2 完全共线, 不入模)
+NX = np.array([CLS_ATTR[c_][1] for c_ in CL], dtype=float)        # 有后键
+PS = np.array([CLS_ATTR[c_][2] - 1 for c_ in CL], dtype=float)    # 段位−1
 A_ = [e[0] for e in events]; B_ = [e[1] for e in events]
 F9 = np.array([[f(a, b) for f in FEATS_F] for a, b in zip(A_, B_)], dtype=float)
 mu9, sd9 = F9.mean(0), F9.std(0) + 1e-12
 F9s = (F9 - mu9) / sd9
 one = np.ones((N, 1))
-X = np.concatenate([one, PV[:, None], NX[:, None], (PV * NX)[:, None], F9s], axis=1)
+X = np.concatenate([one, NX[:, None], PS[:, None], F9s], axis=1)
 
 def irls(X, y, iters=60):
     b = np.zeros(X.shape[1])
@@ -226,62 +240,73 @@ def irls(X, y, iters=60):
     return b, np.sqrt(np.diag(np.linalg.inv(H))), ll, p
 
 b, se, ll, p_err_hat = irls(X, Yerr)
-b0, alpha, beta, gamma = b[0], b[1], b[2], b[3]
-print(f"  有前键 α = {alpha:+.3f} ± {se[1]:.3f} (z={alpha/se[1]:+.2f})   "
-      f"有后键 β = {beta:+.3f} ± {se[2]:.3f} (z={beta/se[2]:+.2f})   "
-      f"前×后 γ = {gamma:+.3f} ± {se[3]:.3f} (z={gamma/se[3]:+.2f}, "
-      f"LRT p={2*norm.sf(abs(gamma/se[3])):.3f})")
-w_raw = b[4:] / sd9                       # 键对特征还原到原始尺度
-base0 = b0 - (b[4:] * mu9 / sd9).sum()    # 角点类 (0,0) 截距
+b0, beta, delta = b[0], b[1], b[2]
+print(f"  有后键 β = {beta:+.3f} ± {se[1]:.3f} (z={beta/se[1]:+.2f}, LRT p={2*norm.sf(abs(beta/se[1])):.4f})   "
+      f"段位 δ = {delta:+.3f} ± {se[2]:.3f} (z={delta/se[2]:+.2f}, LRT p={2*norm.sf(abs(delta/se[2])):.4f})")
+# 常设监控: 并排拟合一次带 γ 的版本, 报 deviance 差与 LRT (γ 仍不显著则可继续用加法形式)
+Xg = np.concatenate([one, NX[:, None], PS[:, None], (NX * PS)[:, None], F9s], axis=1)
+bg, seg_, llg, _ = irls(Xg, Yerr)
+gam, gam_se = bg[3], seg_[3]
+D = 2 * (llg - ll)
+print(f"  [监控] 带交互 γ = {gam:+.3f} ± {gam_se:.3f} (z={gam/gam_se:+.2f})  "
+      f"deviance 差 D = {D:.3f} (df=1, p={2*norm.sf(abs(gam/gam_se)):.3f})  "
+      f"→ {'加法形式维持 (γ 不显著)' if abs(gam/gam_se) < 1.96 else '⚠ γ 转显著, 需复审模型形式'}")
+w_raw = b[3:] / sd9                       # 键对特征还原到原始尺度
+base0 = b0 - (b[3:] * mu9 / sd9).sum()    # 角点类 c0 截距
 
-# 各签名类校准 (饱和类哑变量 → 聚合 O/E 应为 1)
-print("\n签名类校准 (观察错误 / 模型期望):")
-for nm, (v0, v1) in {"(0,0) 角点": (0, 0), "(0,1) 首段": (0, 1),
-                     "(1,1) 中段": (1, 1), "(1,0) 尾段": (1, 0)}.items():
-    m = (PV == v0) & (NX == v1)
+# 各段类校准 (饱和类哑变量 → 聚合 O/E 应为 1)
+print("\n段类校准 (观察错误 / 模型期望):")
+for c_ in range(5):
+    m = (CL == c_)
     o = float(Yerr[m].sum()); e = float(p_err_hat[m].sum())
-    print(f"  {nm:10s} n={int(m.sum()):6d}  obs={int(o):4d}  exp={e:7.1f}  O/E = {o/e:.2f}")
+    print(f"  c{c_} {CLS_NAME[c_]:14s} n={int(m.sum()):6d}  obs={int(o):4d}  exp={e:7.1f}  O/E = {o/e:.2f}")
 
-# 公式验证 (还原系数 vs 模型输出, 中段类)
-def perr_formula(a, b_, pv, nx):
-    logit = base0 + alpha*pv + beta*nx + gamma*pv*nx + (w_raw * np.array([f(a, b_) for f in FEATS_F])).sum()
+# 公式验证 (还原系数 vs 模型输出, 每类各取一对)
+def perr_formula(a, b_, c_):
+    n_, s_ = CLS_ATTR[c_][1], CLS_ATTR[c_][2] - 1
+    logit = base0 + beta*n_ + delta*s_ \
+        + (w_raw * np.array([f(a, b_) for f in FEATS_F])).sum()
     return 1 / (1 + np.exp(-logit))
-print("\n公式验证 (还原系数公式 vs 标准化空间模型, 中段类):")
-for ab_ in ["ab", "fg", "aa", "sz"]:
+print("\n公式验证 (还原系数公式 vs 标准化空间模型):")
+for ab_, c_ in [("ab", 0), ("fg", 1), ("aa", 2), ("sz", 3), ("sz", 4)]:
     a_, b__ = ab_[0], ab_[1]
-    xs = np.concatenate([[1.0, 1.0, 1.0, 1.0],
+    n_, s_ = CLS_ATTR[c_][1], CLS_ATTR[c_][2] - 1
+    xs = np.concatenate([[1.0, n_, s_],
                          (np.array([f(a_, b__) for f in FEATS_F]) - mu9) / sd9])
     pm = 1 / (1 + np.exp(-(b @ xs)))
-    pf = perr_formula(a_, b__, 1, 1)
-    print(f"  {ab_}: 公式 P_err={pf:.4f}  模型={pm:.4f}  ({'✓' if abs(pf-pm)<1e-6 else '✗'})")
+    pf = perr_formula(a_, b__, c_)
+    print(f"  {ab_} c{c_}: 公式 P_err={pf:.4f}  模型={pm:.4f}  ({'✓' if abs(pf-pm)<1e-6 else '✗'})")
 
-# ── 4. 导出: 900 键对 × 4 签名类 ─────────────────────
-print("\n=== 导出 键对错误率表.txt (900 键对 × 4 签名类) ===")
+# ── 4. 导出: 900 键对 × 5 段类 ───────────────────────
+print("\n=== 导出 键对错误率表.txt (900 键对 × 5 段类) ===")
 pairs = [(a, b) for a in LETTERS for b in LETTERS]
 Xp9 = np.array([[f(a, b) for f in FEATS_F] for a, b in pairs], dtype=float)
 base900 = base0 + Xp9 @ w_raw
 sig = lambda z: 1 / (1 + np.exp(-z))
-P00, P01 = sig(base900), sig(base900 + beta)
-P10, P11 = sig(base900 + alpha), sig(base900 + alpha + beta + gamma)
+# 五类电平 (相对 c0 角点): c1=+β, c2=+δ, c3=+β+δ, c4=+2δ   (加法形式, 2026-09-21 去 γ)
+LV = np.array([0.0, beta, delta, beta + delta, 2*delta])
+P5 = np.stack([sig(base900 + lv) for lv in LV])            # (5, 900)
+COLS = ["err_p0n0s1", "err_p0n1s1", "err_p1n0s2", "err_p1n1s2", "err_p1n0s3"]
 (_DIR / "产物").mkdir(exist_ok=True)
 with open(_DIR / "产物" / "键对错误率表.txt", "w", encoding="utf-8") as f:
-    f.write("pair\terr_p0n0\terr_p0n1\terr_p1n0\terr_p1n1\n")
-    for (a, b), v00, v01, v10, v11 in zip(pairs, P00, P01, P10, P11):
-        f.write(f"{a}{b}\t{v00:.4f}\t{v01:.4f}\t{v10:.4f}\t{v11:.4f}\n")
-print(f"  已导出 键对错误率表.txt (列: 角点/首段/尾段/中段, p=有前键 n=有后键)")
-print(f"  类均值 P_err: 角点 {P00.mean()*100:.2f}% / 首段 {P01.mean()*100:.2f}% / "
-      f"尾段 {P10.mean()*100:.2f}% / 中段 {P11.mean()*100:.2f}%")
+    f.write("pair\t" + "\t".join(COLS) + "\n")
+    for k_, (a, b) in enumerate(pairs):
+        f.write(f"{a}{b}\t" + "\t".join(f"{P5[c_][k_]:.4f}" for c_ in range(5)) + "\n")
+print("  已导出 键对错误率表.txt (列 = 段类: p=有前键, n=有后键, s=段位)")
+print("  类均值 P_err: " + "  ".join(f"c{c_} {P5[c_].mean()*100:.2f}%" for c_ in range(5)))
 try:
     _ec = None
     for l in (_DIR / "产物" / "错误修正时间-实测值.txt").read_text(encoding="utf-8").splitlines():
         if l.startswith("cost_ms\t"):
             _ec = float(l.split("\t")[1]); break
     print(f"  平均错误成本 (×实测 {_ec:.0f}ms, 来源 产物/错误修正时间-实测值.txt): "
-          f"T₂ = {_ec*P00.mean():.2f}ms | T₃ = {_ec*(P01+P10).mean():.2f}ms | T₄ = {_ec*(P01+P11+P10).mean():.2f}ms")
+          f"T₂ = {_ec*P5[0].mean():.2f}ms | T₃ = {_ec*(P5[1]+P5[2]).mean():.2f}ms | "
+          f"T₄ = {_ec*(P5[1]+P5[3]+P5[4]).mean():.2f}ms")
 except Exception:
     print("  平均错误成本: 未找到 产物/错误修正时间-实测值.txt (先跑 分析-错误修正时间.py)")
-k = max(range(900), key=lambda i: P11[i])
-print(f"  极值键对: {pairs[k][0]}{pairs[k][1]} 角点 {P00[k]*100:.1f}% / 尾段 {P10[k]*100:.1f}% / 中段 {P11[k]*100:.1f}%")
+k = max(range(900), key=lambda i: P5[4][i])
+print(f"  极值键对: {pairs[k][0]}{pairs[k][1]} 角点 {P5[0][k]*100:.1f}% / 短尾 {P5[2][k]*100:.1f}% / "
+      f"中段 {P5[3][k]*100:.1f}% / 长尾 {P5[4][k]*100:.1f}%")
 
 # ── 5. README §5.5 实证: 签名 vs 类盲 (2026-09-18 自 实验-README数字刷新.py 并入) ──
 # 类盲 = 同特征集但无签名项的逻辑回归; 差异 = 位置信息缺失对 T₂ 角点条目的系统性高估
@@ -297,12 +322,13 @@ if _ec2:
     Xp9s = (Xp9 - mu9) / sd9
     P_bl = sig(b_bl[0] + Xp9s @ b_bl[1:])
     print("\n=== README §5.5: 签名 vs 类盲 (类盲=无签名对照; 偏差与 P_err 成正比, 扭曲 2 键简码排序) ===")
-    print(f"  角点类均值: 签名 {P00.mean()*100:.2f}% vs 类盲 {P_bl.mean()*100:.2f}%  "
-          f"→ 高估 {_ec2*(P_bl.mean()-P00.mean()):.1f}ms/条目")
-    hi = np.argsort(P00)[-90:]
-    print(f"  高错误对 (角点前 10%): 签名 {P00[hi].mean()*100:.2f}% vs 类盲 {P_bl[hi].mean()*100:.2f}%  "
-          f"→ 高估 {_ec2*(P_bl[hi].mean()-P00[hi].mean()):.1f}ms/条目")
+    print(f"  角点类均值: 签名 {P5[0].mean()*100:.2f}% vs 类盲 {P_bl.mean()*100:.2f}%  "
+          f"→ 高估 {_ec2*(P_bl.mean()-P5[0].mean()):.1f}ms/条目")
+    hi = np.argsort(P5[0])[-90:]
+    print(f"  高错误对 (角点前 10%): 签名 {P5[0][hi].mean()*100:.2f}% vs 类盲 {P_bl[hi].mean()*100:.2f}%  "
+          f"→ 高估 {_ec2*(P_bl[hi].mean()-P5[0][hi].mean()):.1f}ms/条目")
     print(f"  平均错误成本: 类盲 T₂ {_ec2*P_bl.mean():.1f} / T₃ {2*_ec2*P_bl.mean():.1f} / T₄ {3*_ec2*P_bl.mean():.1f}"
-          f"   签名 T₂ {_ec2*P00.mean():.1f} / T₃ {_ec2*(P01+P10).mean():.1f} / T₄ {_ec2*(P01+P11+P10).mean():.1f}")
+          f"   签名 T₂ {_ec2*P5[0].mean():.1f} / T₃ {_ec2*(P5[1]+P5[2]).mean():.1f} / "
+          f"T₄ {_ec2*(P5[1]+P5[3]+P5[4]).mean():.1f}")
 else:
     print("\n(未找到 产物/错误修正时间-实测值.txt, 跳过 §5.5 类盲对比)")

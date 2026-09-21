@@ -4,32 +4,38 @@
   研究阶段（默认）: 训练段模型 + 报告总时间 MAE/R²
   完成阶段 --full: 追加导出部署模型 (全数据) 与 4-D 按键时间母表 (npz)
 
-段定义: t = S(p,a,b,n) — 前两键 p,a + 当前键对 a,b + **后继键 n** (v2, 2026-08-29,
+段定义: t = S(角色, p,a,b,n) — 前两键 p,a + 当前键对 a,b + **后继键 n** (v2, 2026-08-29,
 实验-后键条件系列, 结论已存档)。n=∅(索引 30) 表无后继 (词末"甩出")。
-神经分量: 双线性交互(e_p,e_a,e_b) 3 项 + MLP([e_p;e_a;e_b;φ15]) 75→128→64→1 + Dropout0.2
+**段角色 (v4, 2026-09-21 段位特征正式落地)**: S 的条件里加入 (码长 L, 段位 i) —
+段身份 (p,a,b,n) 只编码「是否首段 / 是否末段」, 同一签名在 3 键与 4 键码里角色不同
+(如 3键seg2 与 4键seg3 同签名 (有前键,无后键))。实现 = φ19 = φ15 + [i==2, i==3,
+L==3, L==4]; 3 键进训练池 (train4+train3+train2)。依据 实验/实验-段位特征.py 三刷:
+T₃ 总MAE −1.2~−1.6ms、T₄ −0.3~−0.5ms、T₂ 恒零 (同号显著, 两种测试划分)。
+神经分量: 双线性交互(e_p,e_a,e_b) 3 项 + MLP([e_p;e_a;e_b;φ19]) 79→128→64→1 + Dropout0.2
   (v3.1, 2026-09-02 采纳 d20w128: deep2 加深(v3)再放宽+Dropout — 部署级 blend 总 −0.96,
   dropout 使 5 成员去相关、集成收益放大, 实验-MLP调参.py 第四轮)
   φ15 = φ8(a,b) 几何 + φsuc7 后键特征 [存在, 同手(b,n), 同指(b,n), 同键(b,n),
   Fitts(b,n), 同手(a,n), Fitts(a,n)]; n=∅ 时 φsuc 全 0 (存在位=0)。
-部署形态 (v3, 2026-09-02, 用户确认采纳): BlendModel = 0.3×XGBoost(独热124+φ15)
+部署形态 (v3, 2026-09-02, 用户确认采纳): BlendModel = 0.3×XGBoost(独热124+φ19)
   + 0.7×(deep2 × 固定种子 0-4 平均) — 无 best-of 选优 → 无选优抽签噪声 (决策带
   从 ±3 缩至仅测试重洗 ~±1ms); 依据 实验-架构对比3.py (09-14 当前数据重跑):
   原始口径 总 41.6 / R²+0.592 / 段 25.8 / 角点 16.0 (对单模 base 44.0 −2.4, 对 ens5 −0.6)。
 
 查询公式 (词内语义, 全部查询点有训练分布覆盖, T₂ 角点由 2 键试次内插):
-  两键当量  T₂(ab)   = S(∅,a,b,∅)
-  三键当量  T₃(abc)  = S(∅,a,b,c) + S(a,b,c,∅)
-  四键当量  T₄(abcd) = S(∅,a,b,c) + S(a,b,c,d) + S(b,c,d,∅)
+  两键当量  T₂(xy)   = R(L2i1)[x,y]
+  三键当量  T₃(xyz)  = R(L3i1)[x,y,z] + R(L3i2)[x,y,z]
+  四键当量  T₄(wxyz) = R(L4i1)[w,x,y] + R(L4i2)[w,x,y,z] + R(L4i3)[x,y,z]
 
 键位嵌入: e_k = E[k] ∈ ℝ²⁰ (30 键各独立, 索引 30 = ∅ 前键/后键)
-导出 (2026-09-05 起入 产物/): 按键时间表.npz — 按键时间 F[p,a,b,n] 形状 (31,30,30,31), p/n 维 0-29=键、30=∅,
-  附 letters/empty/version 元数据; 组装当量表.py 查表组合 (段当量 = 按键时间 + 错误率×错误修正时间)。
+导出 (2026-09-05 起入 产物/): 按键时间表.npz — 2026-09-21 起按段角色 **6 片** (version 3;
+  旧版单表 F(31,30,30,31) 无法表达同签名跨码长的角色分裂, 与错误侧 09-19 段类重参数化同因),
+  附 letters/empty/roles/version 元数据; 组装当量表.py 查表组合 (段当量 = 按键时间 + 错误率×错误修正时间)。
   模型: 按键时间模型-神经.pt (deep2×5 权重) + 按键时间模型-xgb.json (XGB 分量)。
 README 实证数字 (2026-09-18 起随 --full 输出, readme_evidence): §5.4 类型×前键 / 键对难度 /
   模型视角 / 排序扭曲 / §6.1 rollover — 原 实验-README数字刷新.py 并入删除 (同 §5.3 内嵌演进);
   §5.5 签名vs类盲随 分析-错误率.py 输出。
 """
-import argparse, os, sys, numpy as np, torch, torch.nn as nn, torch.nn.functional as F
+import argparse, itertools, os, sys, numpy as np, torch, torch.nn as nn, torch.nn.functional as F
 from pathlib import Path
 
 # 运行环境固定 (可复现性, 2026-08-18 实测):
@@ -55,7 +61,7 @@ def _train_member(seed, prev, a, b, nxt, ph, tgt, loss_fn="mse"):
     """单成员: 构造 (seed 显式种子化) + 训练 → (model, 全数据段MAE, 验证段MAE)"""
     with torch.random.fork_rng(devices=[]):
         torch.manual_seed(seed)
-        m = KeystrokeModel()
+        m = KeystrokeModel(d_phi=np.asarray(ph).shape[1])   # φ 宽度取自数据 (段位落地后 = D_PHI 19)
     seg_mae, va_mae = train(m, prev, a, b, nxt, ph, tgt, seed=seed, loss_fn=loss_fn)
     return m, seg_mae, va_mae
 
@@ -105,6 +111,46 @@ LETTERS = 'abcdefghijklmnopqrstuvwxyz;,./'
 KEY_TO_IDX = {c:i for i,c in enumerate(LETTERS)}
 EMPTY = 30  # ∅ 索引 (空前键 / 无后继键, 可学习嵌入)
 
+# ═══════════════ 段角色 (2026-09-21 段位特征正式落地) ═══════════════
+# 段身份 (p,a,b,n) 只编码「是否首段 / 是否末段」——同一签名在 3 键与 4 键码里可能是
+# 不同角色 (3键seg2 与 4键seg1 签名 (1,0)/(0,1) 各自对应不同段位)。错误率侧 2026-09-19
+# 已按「段类 = 签名 × 段位」重参数化; 时间侧同因落地: 模型输入加 φ19 = φ15 + [i==2,
+# i==3, L==3, L==4] (i=段位, L=码长), 按键时间表由单一 4-D F 改为**按角色分 6 片**。
+# 依据 实验/实验-段位特征.py 三刷(988→1322 trial × 两种划分): T₃ 总MAE −1.2~−1.6ms
+# (同号显著)、T₄ −0.3~−0.5ms (小样本时不显著, 3 键数据到 1322 trial 后显著)、T₂ 恒零;
+# T₃ 时间偏差 −3.7→−2.0 (收窄未消除)。3 键入训是 L 特征可学的前提 (否则 L==3 恒 0)。
+ROLES = ((2, 1), (3, 1), (3, 2), (4, 1), (4, 2), (4, 3))   # (码长, 段位), 索引即角色 id
+ROLE_ID = {r: i for i, r in enumerate(ROLES)}
+ROLE_SLICE = (("r_L2i1", (2, 1)), ("r_L3i1", (3, 1)), ("r_L3i2", (3, 2)),
+              ("r_L4i1", (4, 1)), ("r_L4i2", (4, 2)), ("r_L4i3", (4, 3)))
+# 角色 → (参与索引的键数, 该角色的段在 (p,a,b,n) 上如何取用这些键)
+# 索引顺序即该角色实际用到的键序: 首段 (a,b,n) / 末段 (p,a,b) / 中段 (p,a,b,n) / 角点 (a,b)
+ROLE_CELL = {
+    (2, 1): (2, lambda t: (EMPTY, t[0], t[1], EMPTY)),      # T₂ 角点 S(∅,x,y,∅)
+    (3, 1): (3, lambda t: (EMPTY, t[0], t[1], t[2])),       # 3 键首段 S(∅,x,y,z)
+    (3, 2): (3, lambda t: (t[0], t[1], t[2], EMPTY)),       # 3 键短尾 S(x,y,z,∅)
+    (4, 1): (3, lambda t: (EMPTY, t[0], t[1], t[2])),       # 4 键首段 S(∅,w,x,y)
+    (4, 2): (4, lambda t: (t[0], t[1], t[2], t[3])),        # 4 键中段 S(w,x,y,z)
+    (4, 3): (3, lambda t: (t[0], t[1], t[2], EMPTY)),       # 4 键长尾 S(x,y,z,∅)
+}
+ROLE_ERR = {0: "c0", 1: "c1", 2: "c2", 3: "c1", 4: "c3", 5: "c4"}  # 角色 → 错误侧段类
+CORNER_ROLE = ROLE_ID[(2, 1)]      # 2 键角点槽位 (B4b 分桶 / §5.4 桶筛选用)
+FIRST_SEG_ROLES = (ROLE_ID[(2, 1)], ROLE_ID[(3, 1)], ROLE_ID[(4, 1)])   # p=∅ 段
+
+def phi_role(role):
+    """φ19 的段位块 4 维: [i==2, i==3, L==3, L==4] (role 数组 = 角色 id)。
+    6 个角色在该 4 维空间两两可分辨 (L2i1=[0,0,0,0] 为参考电平), 与实验变体逐位一致"""
+    role = np.asarray(role)
+    i = np.array([ROLES[r][1] for r in role.ravel()]).reshape(role.shape)
+    L = np.array([ROLES[r][0] for r in role.ravel()]).reshape(role.shape)
+    return np.stack([(i == 2), (i == 3), (L == 3), (L == 4)], axis=-1).astype(np.float32)
+
+def role_of(code_idx):
+    """(码长, 段位) → 角色 id; 段位 1-based, 段数 = 码长-1"""
+    return ROLE_ID[(len(code_idx), code_idx)]
+
+D_PHI = 19   # φ 宽度 = 15 (φ8 + φsuc7) + 4 (段位块)
+
 def _precompute_phi():
     """φ(a,b) 8 维 — 2026-08-11 文献特征扩展 (实验-特征扩展.py):
     [同手, 同指, 同键, 列距, 行距, Fitts, 镜像手指, 跨行同指]
@@ -134,6 +180,7 @@ def _precompute_phi():
                             fitts, mirror, crsf)
     return feats
 PHI = _precompute_phi()
+PHI_MAT = np.array([[PHI[(x, y)] for y in LETTERS] for x in LETTERS], dtype=np.float32)  # (30,30,8) 批量用
 
 # ── 后键特征 LUT (整数索引, 对称矩阵 30×30) ──
 _COL = np.array([LETTER_TO_COL[c] for c in LETTERS])
@@ -202,13 +249,14 @@ class KeystrokeModel(_SegModel):
     依据 实验-后键条件系列(已删, 结论存档): 对称化总MAE −1.3~−1.6。
     v1 依据 (实验-双线性扩容.py 等): de20 单层最优; relu 最优; RMSNorm 微增益;
     W3 跨键双线性 +2.1ms。"""
-    def __init__(self, d_embed=20, d_hidden=128, p_drop=0.2):
+    def __init__(self, d_embed=20, d_hidden=128, p_drop=0.2, d_phi=D_PHI):
         super().__init__()
+        self.d_phi = d_phi   # φ 宽度自适应 (2026-09-21): 段位特征实验需要 φ19, 默认 15 行为不变
         self.E_key = nn.Embedding(len(LETTERS) + 1, d_embed)  # 30 键 + ∅
         self.W = nn.Parameter(torch.randn(3, d_embed, d_embed) * 0.05)  # (p,a),(a,b),(p,b)
         # v3.1 d20w128: d_hidden 64→128 + Dropout 0.2 (实验-MLP调参.py 部署级 blend
         # 总 −0.96; dropout 成员去相关 → 种子平均收益放大)
-        self.mlp = nn.Sequential(nn.Linear(d_embed*3+15, d_hidden), nn.ReLU(),
+        self.mlp = nn.Sequential(nn.Linear(d_embed*3+d_phi, d_hidden), nn.ReLU(),
                                  RMSNorm(d_hidden), nn.Dropout(p_drop),
                                  nn.Linear(d_hidden, d_hidden//2), nn.ReLU(),
                                  nn.Dropout(p_drop), nn.Linear(d_hidden//2, 1))
@@ -362,8 +410,10 @@ def load_trials(path):
     采集端存档字段; 依据 实验/实验-序号趋势对比.py: 两种口径边界互证一致, session 内无热身
     效应 → 边界不携带状态信息)。
     返回 rows: [(code, times)] 文件顺序; 4 键 times=[b_d,c_d,d_d] (均自首键按下累计,
-    d_d=trial 总时), 2 键 [b_d] (T₂ 角点数据, 08-31 起参与训练), 3 键 [b_d,c_d]
-    (09-19 补采透传, d_d=0; 稳定期分码长边界已覆盖, 时间模型接入待 (码长,位置) 重参数化)。
+    d_d=trial 总时), 3 键 [b_d,c_d] (09-19 补采透传, d_d=0), 2 键 [b_d] (T₂ 角点, 08-31 入训)。
+    3 键稳定期 09-21 晚达 9 块全程并**正式入训** (train_all = train4 + train3 + train2, §5.6):
+    φ19 段位块的 L==3 维只在 3 键样本上可辨识; 改前实测 T₃ 低估 -7.3ms (seg2 占 -5.7) 且
+    单纯加 3 键训练只修 +0.3ms — 缺的是特征里的段位信息。
     过滤同 08-31 版。"""
     rows = []
     with open(path, encoding="utf-8") as f:
@@ -420,8 +470,9 @@ def stable_pools(path, block=150, band=1.10, ref_last=5, smooth=3, min_blocks=8)
     稳定块数 < min_blocks 的码长照常截取并告警 (如积累中的 3 键: 边界随数据自动收紧)。
     划分: 各码长稳定期分别 RandomState(2024) 顺序 permutation 80/20 (先 4 后 2 后 3,
     固定顺序 → 4/2 键随机流与旧版一致)。返回 dict:
-      train_all  训练池 = train4 + train2 (拼接顺序固定; 3键管线落地前不进时间模型)
-      train4/test4/train2/test2/train3/test3  各码长 train/test (3键现暂全保留)
+      train_all  训练池 = train4 + train3 + train2 (拼接顺序固定; 2026-09-21 段位特征落地后
+                 3 键入训 — L==3 特征只在 3 键样本上可辨识, 且这正是 T₃ 偏差的修法)
+      train4/test4/train2/test2/train3/test3  各码长 train/test (test3 现为 T₃ 留出指标)
       deploy4/deploy2/deploy3  各码长稳定期全量 (部署 = 当前状态语义)
       desc  划分说明 (含各码长边界/R/告警)
     依据: 角点 S(∅,a,b,∅) 原为零样本外推 (实测偏差 −6.0±0.8ms), 2 键参与训练使其
@@ -467,17 +518,17 @@ def stable_pools(path, block=150, band=1.10, ref_last=5, smooth=3, min_blocks=8)
     desc = (f"稳定期(分码长): {' | '.join(bd_txt(n) for n in (4, 2, 3))}  "
             f"(4键 {len(stable[4])} + 3键 {len(stable[3])} + 2键 {len(stable[2])} trial"
             + (f"; ⚠ {'; '.join(warn)}" if warn else "") + ")")
-    return {"train_all": out["train4"] + out["train2"], "desc": desc, **out}
+    return {"train_all": out["train4"] + out["train3"] + out["train2"], "desc": desc, **out}
 
 def _seg_layout(data):
-    """段槽位与 trial 归属 (混合池: 4 键 trial 3 段 slot 0/1/2, 2 键 trial 单段 slot 3=角点)。
-    B4b 的段位分桶与 trial 完整性检查共用。"""
+    """段槽位与 trial 归属 (6 角色: 4 键 (4,1)/(4,2)/(4,3) · 3 键 (3,1)/(3,2) · 2 键角点 (2,1))。
+    B4b 的段位分桶与 trial 完整性检查共用 — 2026-09-21 段位特征落地后分桶按 (码长,段位):
+    4 键与 2 键段的分桶划分与旧 4 槽版逐位等价 (旧槽 0/1/2 = 4 键三段, 旧槽 3 = 角点),
+    仅新增 3 键两段各自成桶。"""
     pos, tri = [], []
     for ti, (code, _) in enumerate(data):
-        if len(code) == 4:
-            pos += [0, 1, 2]; tri += [ti] * 3
-        else:
-            pos += [3]; tri += [ti]
+        for i in range(len(code) - 1):
+            pos.append(ROLE_ID[(len(code), i + 1)]); tri.append(ti)
     return np.array(pos), np.array(tri)
 
 def mad_filter_segments(data, tgt, k=3.0):
@@ -552,25 +603,36 @@ def residual_filter_segments(data, prev, a, b, nxt, ph, tgt, k=3.0, m0_seeds=5):
     data_full = [d for d, ok in zip(data, tri_ok) if ok]
     return keep, data_full
 
+def model_dphi(model):
+    """模型的 φ 期望宽度 (用于构造查询特征; BlendModel 取成员; 未知则 D_PHI)。
+    部署模型恒为 D_PHI=19; 该助手让查询侧在 φ15 对照/旧权重下也能工作。"""
+    m = getattr(model, "members", [model])[0]
+    return int(getattr(m, "d_phi", D_PHI))
+
 def build_tensors(data):
     """全部段样本: (prev, a, b, nxt, phi15, target)。
-    4 键 trial: 段 S(∅,a,b,c) / S(a,b,c,d) / S(b,c,d,∅) — slot 0/1/2 交错;
-    2 键 trial (08-31 起参与训练): 单段 S(∅,a,b,∅) = T₂ 角点"""
+    4 键 trial: 段 S(∅,a,b,c) / S(a,b,c,d) / S(b,c,d,∅) — 角色 (4,1)/(4,2)/(4,3);
+    3 键 trial: 段 S(∅,a,b,c) / S(a,b,c,∅)           — 角色 (3,1)/(3,2);
+    2 键 trial: 单段 S(∅,a,b,∅) = T₂ 角点            — 角色 (2,1)。
+    φ19 = φ15 + 段位块 [i==2, i==3, L==3, L==4] (2026-09-21 段位特征落地)"""
     segs = []
     for code, ts in data:
-        if len(code) == 2:
-            segs.append((EMPTY, code[0], code[1], EMPTY, ts[0]))
+        n = len(code)
+        if n == 2:
+            segs.append((EMPTY, code[0], code[1], EMPTY, ts[0], ROLE_ID[(2, 1)]))
             continue
-        a,b,c,d = code
-        segs.append((EMPTY, a, b, c, ts[0]))
-        segs.append((a, b, c, d, ts[1]-ts[0]))
-        segs.append((b, c, d, EMPTY, ts[2]-ts[1]))
+        for i in range(n - 1):        # 段 i (0-based, 段位 = i+1): code[i]→code[i+1]
+            pv = EMPTY if i == 0 else code[i - 1]
+            nx = code[i + 2] if i + 2 < n else EMPTY      # 后继键 = 段末键的下一个
+            t0 = 0.0 if i == 0 else ts[i - 1]
+            segs.append((pv, code[i], code[i + 1], nx, ts[i] - t0, ROLE_ID[(n, i + 1)]))
     prev = np.array([s[0] if isinstance(s[0], int) else KEY_TO_IDX[s[0]] for s in segs], dtype=np.int64)
     a = np.array([KEY_TO_IDX[s[1]] for s in segs], dtype=np.int64)
     b = np.array([KEY_TO_IDX[s[2]] for s in segs], dtype=np.int64)
     nxt = np.array([s[3] if isinstance(s[3], int) else KEY_TO_IDX[s[3]] for s in segs], dtype=np.int64)
     ph8 = np.array([PHI[(s[1], s[2])] for s in segs], dtype=np.float32)
-    ph = np.concatenate([ph8, phi_suc(a, b, nxt)], axis=1)
+    role = np.array([s[5] for s in segs], dtype=np.int64)
+    ph = np.concatenate([ph8, phi_suc(a, b, nxt), phi_role(role)], axis=1)
     tgt = np.array([s[4] for s in segs], dtype=np.float32)
     return prev, a, b, nxt, ph, tgt
 
@@ -638,25 +700,36 @@ def eval_seg(model, prev, a, b, nxt, ph, tgt):
     return float(np.mean(np.abs(pred - tgt)))
 
 def total_preds(model, data):
-    """四键总时间预测 (ms, float64) — 三段一次批量前向, eval_total/对比脚本共用"""
-    ids, phs = [], []
-    for (x, y, z, w), _ in data:
-        ix, iy, iz, iw = (KEY_TO_IDX[x], KEY_TO_IDX[y], KEY_TO_IDX[z], KEY_TO_IDX[w])
-        ids += [[EMPTY, ix, iy, iz], [ix, iy, iz, iw], [iy, iz, iw, EMPTY]]
-        for (pa, pb, pn) in ((ix, iy, iz), (iy, iz, iw), (iz, iw, EMPTY)):
-            phs.append(np.concatenate([PHI[(LETTERS[pa], LETTERS[pb])],
-                                       phi_suc([pa], [pb], [pn])[0]]))
+    """总时间预测 (ms, float64) — 每 trial 逐段一次批量前向 (码长 2/3/4 通用), 末段累计时。
+    段角色随 (码长, 段位) 进入 φ19 (2026-09-21 段位特征落地); 2 键 = 单段角点。"""
+    if not data:
+        return np.zeros(0)
+    ids, phs, nseg = [], [], []
+    for code, _ in data:
+        n = len(code)
+        nseg.append(n - 1)
+        for i in range(n - 1):
+            pv = EMPTY if i == 0 else KEY_TO_IDX[code[i - 1]]
+            nx = KEY_TO_IDX[code[i + 2]] if i + 2 < n else EMPTY
+            ix, iy = KEY_TO_IDX[code[i]], KEY_TO_IDX[code[i + 1]]
+            ids.append([pv, ix, iy, nx])
+            phs.append(np.concatenate([PHI[(code[i], code[i + 1])],
+                                       phi_suc([ix], [iy], [nx])[0],
+                                       phi_role([ROLE_ID[(n, i + 1)]])[0]]))
     model.eval()
+    ph = np.array(phs, dtype=np.float32)[:, :model_dphi(model)]
     with torch.no_grad():
-        pred = model._batch(torch.tensor(ids), torch.tensor(np.array(phs, dtype=np.float32))).numpy()
-    return pred.reshape(-1, 3).astype(np.float64).sum(axis=1)
+        pred = model._batch(torch.tensor(ids), torch.tensor(ph)).numpy()
+    tri_of = np.repeat(np.arange(len(data)), nseg)          # 段 → trial 归属求和
+    return np.bincount(tri_of, weights=pred, minlength=len(data))
 
 def eval_total(model, data):
-    """四键总时间 MAE/R² (全数据)。数值与逐 trial 逐段求和等价
-    (2026-08-18 批量化: 4539 trial 8.4s → ~0.01s)"""
+    """总时间 MAE/R² (全数据; 码长 2/3/4 通用)。数值与逐 trial 逐段求和等价
+    (2026-08-18 批量化: 4539 trial 8.4s → ~0.01s)。实测值取 trial 末段累计时
+    (4 键 d_d / 3 键 c_d / 2 键 b_d)"""
     if not data:
         return float("nan"), float("nan")
-    ys = np.array([ts[2] for _, ts in data])
+    ys = np.array([ts[len(c) - 2] for c, ts in data])
     errs = np.abs(total_preds(model, data) - ys)
     mae = float(errs.mean())
     r2 = 1 - float(np.sum(errs**2)) / max(float(np.sum((ys-ys.mean())**2)), 1e-9)
@@ -664,33 +737,51 @@ def eval_total(model, data):
 
 # ═══════════════════ 导出 ═══════════════════
 
-def build_seg_table(model):
-    """4-D 按键时间表 F[p,a,b,n] = S(p,a,b,n) ms, 形状 (31,30,30,31)。
-    p/n 维 0-29 = 键, 30 = ∅ (与模型索引一致); a/b 维 0-29 = 键。
-    按 p 分 31 批 (每批 30×30×31 = 27,900 行) 一次前向。"""
+def build_seg_table(model, chunk=100_000):
+    """按键时间母表 — 2026-09-21 段位特征落地后按**段角色分 6 片** (单一 4-D F 已不可能:
+    同一 (p,a,b,n) 格在 3 键与 4 键码中角色不同, 段位块 φ19 使 S 依赖角色)。返回 dict:
+      r_L2i1 (30,30)               T₂ 角点 S(∅,x,y,∅)
+      r_L3i1 / r_L4i1 (30,30,30)   首段 S(∅,x,y,z)  (3 键 / 4 键各自角色)
+      r_L3i2 / r_L4i3 (30,30,30)   末段 S(x,y,z,∅)  (3 键短尾 / 4 键长尾)
+      r_L4i2 (30,30,30,30)         中段 S(w,x,y,z)
+    共 918,900 条; 每片按自身索引维的字母序排列 (索引即该角色实际用到的键)。
+    旧单表 864,900 条 = 4 键三段 (p,a,b,n) 网格 + 角点, 其中 (1,0) 格被 3/4 键共用——
+    这正是段位特征要拆开的东西。"""
     n = len(LETTERS)
-    tri = [(a, b, x) for a in range(n) for b in range(n) for x in list(range(n)) + [EMPTY]]
-    ph8 = np.array([PHI[(LETTERS[a], LETTERS[b])] for a, b, _ in tri], dtype=np.float32)
-    ta = np.array([t[0] for t in tri]); tb = np.array([t[1] for t in tri])
-    tn = np.array([t[2] for t in tri])
-    phs = np.concatenate([ph8, phi_suc(ta, tb, tn)], axis=1)
-    F = np.empty((n + 1, n, n, n + 1), dtype=np.float32)
+    out = {}
+    model.eval()
     with torch.no_grad():
-        for p in range(n + 1):
-            ids = torch.tensor([[p, a, b, x] for a, b, x in tri])
-            F[p] = model._batch(ids, torch.tensor(phs)).numpy().reshape(n, n, n + 1)
-    return F
+        for role, (nk, cell) in ROLE_CELL.items():
+            L, i = role
+            tup = np.array(list(itertools.product(range(n), repeat=nk)), dtype=np.int64)
+            pv = np.empty(len(tup), np.int64); av = np.empty(len(tup), np.int64)
+            bv = np.empty(len(tup), np.int64); nv = np.empty(len(tup), np.int64)
+            for r, t in enumerate(tup):
+                p_, a_, b_, n_ = cell(t)
+                pv[r], av[r], bv[r], nv[r] = p_, a_, b_, n_
+            rid = np.full(len(tup), ROLE_ID[role], np.int64)
+            ph = np.concatenate([PHI_MAT[av, bv], phi_suc(av, bv, nv), phi_role(rid)], axis=1)
+            pred = np.empty(len(tup), np.float32)
+            phw = ph[:, :model_dphi(model)]        # 按模型宽度取 (部署恒 19)
+            for s in range(0, len(tup), chunk):
+                ids = torch.tensor(np.stack([pv[s:s+chunk], av[s:s+chunk],
+                                             bv[s:s+chunk], nv[s:s+chunk]], axis=1))
+                pred[s:s+chunk] = model._batch(ids, torch.tensor(phw[s:s+chunk])).numpy()
+            out[f"r_L{L}i{i}"] = pred.reshape((n,) * nk)
+    return out
 
 def _bigram_ms(model):
     """T₂ 角点 B[a,b] = S(∅,a,b,∅) ms (词末两键, 未归一化), 形状 (30,30)。
-    角点 (p=∅,n=∅) 无训练样本 — 特征空间内插, 2 键试次直接测量"""
+    角点角色 (2,1) 有 2 键实测训练样本 (08-31 起), 属内插而非外推"""
     n = len(LETTERS)
     ids = torch.tensor([[EMPTY, a, b, EMPTY] for a in range(n) for b in range(n)])
-    ph8 = np.array([PHI[(LETTERS[a], LETTERS[b])] for a in range(n) for b in range(n)], dtype=np.float32)
-    phs = np.concatenate([ph8, phi_suc(np.arange(n).repeat(n), np.tile(np.arange(n), n),
-                                       np.full(n*n, EMPTY))], axis=1)
+    ar = np.arange(n).repeat(n); br = np.tile(np.arange(n), n)
+    rid = np.full(n * n, ROLE_ID[(2, 1)], np.int64)
+    phs = np.concatenate([PHI_MAT[ar, br],
+                          phi_suc(ar, br, np.full(n * n, EMPTY)),
+                          phi_role(rid)], axis=1)
     with torch.no_grad():
-        return model._batch(ids, torch.tensor(phs)).numpy().reshape(n, n)
+        return model._batch(ids, torch.tensor(phs[:, :model_dphi(model)])).numpy().reshape(n, n)
 
 def load_chen():
     """陈一凡 1986 两键当量表 txt (键对\t当量, 900 行定向) → {(a,b): 当量}。
@@ -749,25 +840,29 @@ def chen_comparison(m, pools, test_full):
         tag = "本征 ms" if k is None else f"×k₂={k:.1f}"
         print(f"  {name:14s}: MAE {err.mean():6.1f}ms (中位 {np.median(err):5.1f})  [{tag}]  排名 {sp:.4f}")
 
-def export_seg_table(model, out_path, F=None):
-    """4-D 按键时间母表 (npz): F (31,30,30,31) float32 + 元数据。
-    查询组合 (组装当量表.py / 组装-chai当量表.py):
-      T₂(ab)   = F[∅,a,b,∅]           (角点, 2 键试次验证中)
-      T₃(abc)  = F[∅,a,b,c] + F[a,b,c,∅]
-      T₄(abcd) = F[∅,a,b,c] + F[a,b,c,d] + F[b,c,d,∅]
-    v1 的 3-D 文本段表 (当量-段表.txt) 由本文件替代 (2026-08-29 npz 化)。
-    F 可由调用方传入 (README 实证块复用, 免二次前向)。"""
-    if F is None:
-        F = build_seg_table(model)
-    np.savez_compressed(out_path, F=F,
+def export_seg_table(model, out_path, T=None):
+    """按键时间母表 (npz) — 2026-09-21 起按段角色 6 片 (version 3; 旧版单表 F(31,30,30,31) version 2)。
+    段角色 = (码长, 段位); 同一 (p,a,b,n) 格在 3 键与 4 键码中角色不同 (段位块 φ19 参与建模),
+    故 4-D 单表无法表达 (与错误侧 2026-09-19 段类重参数化同因)。查询组合:
+      T₂(xy)    = r_L2i1[x,y]
+      T₃(xyz)   = r_L3i1[x,y,z] + r_L3i2[x,y,z]
+      T₄(wxyz)  = r_L4i1[w,x,y] + r_L4i2[w,x,y,z] + r_L4i3[x,y,z]
+    各片索引即该角色实际用到的键 (见 ROLE_CELL), 键序与 LETTERS 一致。
+    T 可由调用方传入 (README 实证块复用, 免二次前向)。"""
+    if T is None:
+        T = build_seg_table(model)
+    np.savez_compressed(out_path, **T,
                         letters=np.array(list(LETTERS)), empty=np.int64(EMPTY),
-                        version=np.int64(2),
-                        note=np.array("按键时间 S(p,a,b,n) ms; p/n 维 0-29=键 30=EMPTY; "
-                                      "T2=F[30,a,b,30] T3=F[30,a,b,c]+F[a,b,c,30] "
-                                      "T4=F[30,a,b,c]+F[a,b,c,d]+F[b,c,d,30]"))
-    print(f"  按键时间表: {out_path}  (F {F.shape}, {F.size:,} 条, npz)")
+                        version=np.int64(3),
+                        roles=np.array([f"L{L}i{i}" for L, i in ROLES]),
+                        note=np.array("按键时间 S(段角色,p,a,b,n) ms; 段角色 = (码长,段位); "
+                                      "T2=r_L2i1[x,y] T3=r_L3i1[x,y,z]+r_L3i2[x,y,z] "
+                                      "T4=r_L4i1[w,x,y]+r_L4i2[w,x,y,z]+r_L4i3[x,y,z]; "
+                                      "片索引即该角色用到的键序 (首段 a,b,n / 末段 p,a,b / 中段 p,a,b,n)"))
+    tot = sum(v.size for v in T.values())
+    print(f"  按键时间表: {out_path}  (6 角色片 {[v.shape for v in T.values()]}, {tot:,} 条, npz)")
 
-def readme_evidence(deploy_all, dprev, da, db, dn, dph, dtgt, dkeep, F):
+def readme_evidence(deploy_all, dprev, da, db, dn, dph, dtgt, dkeep, T):
     """README 实证数字 (2026-09-18 起随 --full 输出; 原 实验/实验-README数字刷新.py 并入删除,
     同 §5.3 陈表对比的"独立脚本→内嵌"演进)。复用内存中的部署池 B4b 掩码与按键时间表 F, 零额外训练;
     每块首行即数字意义注记, 与 README 节号对应。§5.5 签名vs类盲在 分析-错误率.py。"""
@@ -780,12 +875,12 @@ def readme_evidence(deploy_all, dprev, da, db, dn, dph, dtgt, dkeep, F):
         return "同指异键" if COL_TO_FINGER[LETTER_TO_COL[a]] == COL_TO_FINGER[LETTER_TO_COL[b]] else "同手异指"
 
     pos, _ = _seg_layout(deploy_all)
-    sel = dkeep.copy()
-    sel[pos == 3] = False                    # 角点段不入"空前首段"桶 (§5.4 语义 = 4 键首段)
+    four = np.isin(pos, [ROLE_ID[(4, 1)], ROLE_ID[(4, 2)], ROLE_ID[(4, 3)]])  # §5.4 语义 = 4 键段
+    sel = dkeep & four
     print("\n=== README 实证数字 (复用部署 B4b 掩码与按键时间表, 零额外训练) ===")
     rows54 = defaultdict(lambda: defaultdict(list))
     for i in np.where(sel)[0]:
-        rows54[ptype(LETTERS[da[i]], LETTERS[db[i]])]["空前" if pos[i] == 0 else "有前键"].append(dtgt[i])
+        rows54[ptype(LETTERS[da[i]], LETTERS[db[i]])]["空前" if pos[i] == ROLE_ID[(4, 1)] else "有前键"].append(dtgt[i])
     print("[§5.4 类型×前键] 段间隔中位 ms — 空前=词首段(静止启动) vs 有前键=词中段(手不回位), 差=前键条件效应")
     print(f"  {'类型':8s} {'空前(首段)':>10s} {'有前键':>8s} {'差':>7s}")
     for t in ("跨手", "同手异指", "同键重复", "同指异键"):
@@ -806,14 +901,16 @@ def readme_evidence(deploy_all, dprev, da, db, dn, dph, dtgt, dkeep, F):
     print("[模型视角] 部署表 S(∅,x,y) vs mean_p S(p,x,y) ms — 差=同键对『角点→有前键』的模型内抬升 (§5.4 末段)")
     for x, y in (("f", "i"), ("w", "v"), ("a", "z"), ("a", "a")):
         i, j = KEY_TO_IDX[x], KEY_TO_IDX[y]
-        corner = float(F[EMPTY, i, j, EMPTY]); withprev = float(np.mean(F[:30, i, j, :]))
+        corner = float(T["r_L2i1"][i, j])                  # 角点角色 (2,1)
+        withprev = float(np.mean(T["r_L4i2"][:, i, j, :]))   # 中段角色 (4,2), 对 p 与 n 求均值
         print(f"  {x}{y}: 角点 {corner:.0f} vs 有前键均值 {withprev:.0f}  差 {withprev-corner:+.0f}")
 
     print("[排序扭曲] 两键累加 vs 条件 T₄ (随机 2 万码) — 两键表不可修的结构性错位实证 (§5.4 末段)")
     rng = np.random.RandomState(7)
     codes = rng.randint(0, 30, size=(20000, 4))
-    B = F[EMPTY, :, :, EMPTY]
-    t4c = np.array([F[EMPTY, c, d, e] + F[c, d, e, g_] + F[d, e, g_, EMPTY] for c, d, e, g_ in codes])
+    B = T["r_L2i1"]
+    t4c = np.array([T["r_L4i1"][c, d, e] + T["r_L4i2"][c, d, e, g_] + T["r_L4i3"][d, e, g_]
+                    for c, d, e, g_ in codes])
     t4t = np.array([B[c, d] + B[d, e] + B[e, g_] for c, d, e, g_ in codes])
     sp, _ = spearmanr(t4c, t4t)
     i1, i2 = rng.randint(0, 20000, 200000), rng.randint(0, 20000, 200000)
@@ -859,22 +956,23 @@ def main():
 
     print(f"加载: {DATA}")
     pools = stable_pools(str(DATA))
-    data = pools["train_all"]            # 训练池 = 4 键 train + 2 键角点 train (拼接序固定)
+    data = pools["train_all"]            # 训练池 = 4 键 train + 3 键 train + 2 键角点 train (拼接序固定)
     train_data, test_data = pools["train4"], pools["test4"]
     print(f"4 键样本: {pools['desc']}")
-    print(f"段样本: 训练池 {len(data)} trial → {3*pools['train4'].__len__()+pools['train2'].__len__()} 段")
+    print(f"段样本: 训练池 {len(data)} trial → {3*len(pools['train4'])+2*len(pools['train3'])+len(pools['train2'])} 段")
 
     # ── 主口径划分: 稳定期内固定 trial 测试集 (4 键与 2 键各自 80/20, 同 RandomState(2024)
     #    顺序划分; 2 键测试 trial 不进训练 → 角点指标非循环) ──
     print(f"划分版本: 稳定期 4键 N={len(train_data)+len(test_data)}, 测试集 {len(test_data)} (20%), "
           f"+ 2键角点 训练 {len(pools['train2'])} / 留出 {len(pools['test2'])}, 种子 2024")
-    print(f"训练 trial {len(train_data)}+{len(pools['train2'])} / 测试 trial {len(test_data)}+{len(pools['test2'])}")
+    print(f"训练 trial {len(train_data)}+{len(pools['train2'])}+{len(pools['train3'])} / "
+          f"测试 trial {len(test_data)}+{len(pools['test3'])}+{len(pools['test2'])}")
 
     # ── 评估模型: 训练池 B4b (4键+2键角点) + v3 混合 (XGB 0.3 + deep2×5 固定种子平均;
     #    无 best-of 选优 → 无选优抽签噪声; 测试 trial 的段不进训练, 无泄漏) ──
     prev, a, b, nxt, ph, tgt = build_tensors(data)
     keep, _ = residual_filter_segments(data, prev, a, b, nxt, ph, tgt)
-    print(f"训练池 B4b 剔除 (键对分桶带符号残差, 单侧上围栏 k=3): 保留 {int(keep.sum())}/{len(tgt)} 段 (4键+2键角点)")
+    print(f"训练池 B4b 剔除 (键对分桶带符号残差, 单侧上围栏 k=3): 保留 {int(keep.sum())}/{len(tgt)} 段 (4键+3键+2键角点)")
     prev, a, b, nxt, ph, tgt = prev[keep], a[keep], b[keep], nxt[keep], ph[keep], tgt[keep]
 
     print(f"\n=== 评估模型训练 (v3 混合: XGB {W_XGB} + deep2×{len(BlendModel.SEEDS)} 固定种子平均) ===")
@@ -909,6 +1007,28 @@ def main():
         errs, diffs = np.array(errs), np.array(diffs)
         print(f"角点指标 (T₂ 留出 n={len(errs)}): 段MAE={errs.mean():5.1f}  偏差={diffs.mean():+5.1f} (中位 {np.median(diffs):+.1f})")
 
+    # ── T₃ 留出指标 (3 键 test3 = 20% 稳定期 3 键 trial; 09-21 段位落地后 3 键入训,
+    #    test3 成干净留出 — 补齐旧管线「3 键无留出」的评估空位) ──
+    if pools["test3"]:
+        k3p, k3a, k3b, k3n, k3ph, k3t = build_tensors(pools["test3"])
+        k3keep, test3_full = residual_filter_segments(pools["test3"], k3p, k3a, k3b, k3n, k3ph, k3t)
+        if test3_full:
+            mae3, r23 = eval_total(blend_m, test3_full)
+            pred3 = total_preds(blend_m, test3_full)
+            y3 = np.array([ts[1] for _, ts in test3_full])
+            pos3, _ = _seg_layout(pools["test3"])
+            ids3 = torch.tensor(np.stack([k3p[k3keep], k3a[k3keep], k3b[k3keep], k3n[k3keep]], axis=1))
+            with torch.no_grad():
+                seg3 = blend_m._batch(ids3, torch.tensor(k3ph[k3keep])).numpy()
+            b3 = seg3 - k3t[k3keep]
+            r3 = pos3[k3keep]
+            print(f"T₃ 指标 (3 键留出 n={len(test3_full)}): 总MAE={mae3:5.1f}  "
+                  f"偏差={float((pred3-y3).mean()):+5.1f} (中位 {np.median(pred3-y3):+.1f})  R²={r23:+.3f}")
+            print(f"  段位偏差分解: 首段 L3i1 {b3[r3 == ROLE_ID[(3, 1)]].mean():+5.1f}ms "
+                  f"(n={int((r3 == ROLE_ID[(3, 1)]).sum())})  |  "
+                  f"短尾 L3i2 {b3[r3 == ROLE_ID[(3, 2)]].mean():+5.1f}ms "
+                  f"(n={int((r3 == ROLE_ID[(3, 2)]).sum())})")
+
     # ── 陈一凡表对比 (内嵌 2026-09-09, README §5.3; 评估模型 in-memory, 无重训无中间产物) ──
     if CHEN_TXT.exists() and test_full:
         chen_comparison(blend_m, pools, test_full)
@@ -923,10 +1043,10 @@ def main():
     #    2026-08-30 起部署池=稳定期, 08-31 起含 2 键角点全量 — 角点条目内插化;
     #    2026-09-02 起部署形态=XGB+deep2×5 混合, 固定种子无选优) ──
     print(f"\n=== 部署模型 (稳定期全量训练, v3 混合 — 导出用, 指标见上方评估模型) ===")
-    deploy_all = pools["deploy4"] + pools["deploy2"]
+    deploy_all = pools["deploy4"] + pools["deploy3"] + pools["deploy2"]
     dprev, da, db, dn, dph, dtgt = build_tensors(deploy_all)
     dkeep, _ = residual_filter_segments(deploy_all, dprev, da, db, dn, dph, dtgt)
-    print(f"全数据 B4b: 保留 {int(dkeep.sum())}/{len(dtgt)} 段  (稳定期全量, 4键+2键角点)")
+    print(f"全数据 B4b: 保留 {int(dkeep.sum())}/{len(dtgt)} 段  (稳定期全量, 4键+3键+2键角点)")
     ev_arrays = (dprev, da, db, dn, dph, dtgt, dkeep)   # README 实证块复用 (未过滤布局 + 掩码)
     dprev, da, db, dn, dph, dtgt = dprev[dkeep], da[dkeep], db[dkeep], dn[dkeep], dph[dkeep], dtgt[dkeep]
     douts = train_members([(s, dprev, da, db, dn, dph, dtgt) for s in BlendModel.SEEDS])
@@ -937,10 +1057,10 @@ def main():
     print("\n=== 导出 ===")
     ART_DIR.mkdir(exist_ok=True)
     deploy_m.save(str(MODEL_PT), str(MODEL_XGB))
-    print(f"  模型 → 产物/按键时间模型-神经.pt (deep2×5 权重) + 产物/按键时间模型-xgb.json (XGB 分量; 与 v2 权重不兼容)")
-    F = build_seg_table(deploy_m)
-    export_seg_table(deploy_m, str(SEG_NPZ), F)
-    readme_evidence(deploy_all, *ev_arrays, F)
+    print(f"  模型 → 产物/按键时间模型-神经.pt (deep2×5 权重) + 产物/按键时间模型-xgb.json (XGB 分量; φ19 段位落地后与旧权重不兼容)")
+    T = build_seg_table(deploy_m)
+    export_seg_table(deploy_m, str(SEG_NPZ), T)
+    readme_evidence(deploy_all, *ev_arrays, T)
 
 
 if __name__ == "__main__":
