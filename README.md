@@ -440,19 +440,24 @@ python 组装当量表.py                    # 5. 产物/段当量表.npz（6 �
 | 产物/总当量-2-4键.txt | 837,900 条 2/3/4 键总当量 = 段当量求和（ms，错误成本内含） |
 | 产物/按键时间模型-神经.pt + 产物/按键时间模型-xgb.json | 部署按键时间模型 v4 混合双文件（神经分量 deep2×5 平均 + XGB 分量，段角色 φ19；稳定期训练；`BlendModel.load()` + `model.total(code)` 预测任意码；xgboost 依赖） |
 
-### 产物分发（2026-09-21 起）
+### 产物分发（2026-09-22 定：产物不由 git 管理）
 
-产物七件 (~20MB) 每次数据刷新整体换新、历史产物无参考价值，故**不进主仓库 git 历史**：
+产物七件 (~20MB) 每次数据刷新整体换新、历史产物无参考价值，且本机网络对 GitHub 附件/HTTPS 不可靠
+（见下）——故**产物彻底不入 git、不发布**：**只在本机 OneDrive `击键测速/产物/` 保留最新一份**，
+下游（calc-schema 等）直接读该目录。主仓库只放代码 + 采集数据 + 本文档（克隆 3.8MB / `.git` 2.6MB）。
 
-| 渠道 | 内容 | 取用 |
-|------|------|------|
-| 主仓库 `conditional-keystroke-timing` | 代码 + 采集数据 + README（**不含产物**，克隆 ~1.5MB） | `git clone git@github.com:zhanghaozhecn/conditional-keystroke-timing.git` |
-| 产物仓库 `conditional-keystroke-timing-products` | **最新一份**七件产物（恒为单提交，每次刷新 `commit --amend` + `push --force` 覆盖） | `git clone git@github.com:zhanghaozhecn/conditional-keystroke-timing-products.git` |
-| 本机 OneDrive `击键测速/产物/` | 规范源（下游 calc-schema 等直接读此处） | — |
+演进记录（供查证）：09-06 产物首次入库 → 09-18 曾决策「最终快照随仓库分发」→ **09-21 用
+`git filter-branch --index-filter 'git rm -r --cached --ignore-unmatch 产物'` 自全部 40 个提交剔除
+并 force-push**（`.git` 25MB→2.6MB，`.gitignore` 加 `产物/` 规则作安全网）→ 同日试过 GitHub Release
+附件与独立产物仓库两条通道 → **09-22 用户决策「产物不需要用 git 管理，本机保留最新产物就行」，
+两条通道全部废弃**（`sync_github.py` 只同步代码 + 数据）。
 
-**为什么不用 GitHub Release 附件**（2026-09-21 实测）：本机网络到 `release-assets.githubusercontent.com` 不稳——上传端 gh 对非 ASCII 附件名会退化成 `default.npz`（改 ASCII 名 zip 后可上传），**下载端 2 次测试 1 次 TLS 超时、1 次只下到 3.6MB/12.4MB 截断**；而 git(SSH) 稳定（同期 12-20MB push 全部成功）。HTTPS 访问 github.com 亦被重置 → **一律用 SSH 远端**。
+**本机网络实测（2026-09-21，跨项目通用）**：① `release-assets.githubusercontent.com` 不可靠 ——
+上传端 gh 对非 ASCII 附件名会退化成 `default.npz`，下载端 2 次测试 1 次 TLS handshake 超时、
+1 次**静默截断**（只下到 3.6MB / 应有 12.4MB）；② HTTPS 访问 github.com 被 reset
+（`Recv failure: Connection was reset`）→ **一律用 SSH 远端**；③ git(SSH) 推 12-20MB 稳定。
 
-主仓库的旧产物（09-06~09-18 入库的 `当量-*.txt` / `keystroke_model.pt` 等，~21MB）已于 2026-09-21 用 `git filter-branch` 自**全部历史**剔除并 force-push（主仓库 .git 由 25MB 降到 2.6MB）；`.gitignore` 已加 `产物/` 规则作安全网。**注意：history 已重写，其它机器上的旧克隆需重新 clone。**
+**注意**：主仓库 history 已于 09-21 重写，其它机器上的旧克隆需重新 clone（不能 pull）。
 
 ### 目录
 
@@ -470,8 +475,7 @@ python 组装当量表.py                    # 5. 产物/段当量表.npz（6 �
 │   ├── 击键测速数据.tsv           # 2/4 键采集原始数据（随仓库分发）
 │   ├── 错误修正时间-错误键.tsv    # 错误修正时间采集数据（随仓库分发）
 │   └── 陈一凡当量表.txt           # 陈表对比数据（键对↔当量 900 行，随仓库分发）
-├── 产物/                          # **不进主仓库 git 历史**（2026-09-21 起）——最新快照在独立仓库
-│                                 # conditional-keystroke-timing-products（恒为单提交）
+├── 产物/                          # **不入 git**（2026-09-22 定；只在本机保留最新一份）
 │   ├── 按键时间模型-神经.pt + 按键时间模型-xgb.json
 │   └── 按键时间表.npz / 键对错误率表.txt / 错误修正时间-实测值.txt / 段当量表.npz / 总当量-2-4键.txt
 └── 实验/                          # 实验脚本（不随仓库分发，sys.path 上溯根目录）
