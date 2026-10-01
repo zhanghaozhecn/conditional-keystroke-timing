@@ -556,7 +556,7 @@ python sync_github.py                   # 6. 同步代码+数据到 GitHub（--d
 
 产物七件 (~20MB) 每次数据刷新整体换新、历史产物无参考价值，且本机网络对 GitHub 附件/HTTPS 不可靠
 （见下）——故**产物彻底不入 git、不发布**：**只在本机 OneDrive `串击击键当量/产物/` 保留最新一份**，
-下游（calc-schema 等）直接读该目录。主仓库只放代码 + 采集数据 + 本文档（克隆 ~4.3MB / `.git` ~3.0MB）。
+下游（calc-schema 等）直接读该目录。主仓库只放代码 + 采集数据 + 本文档（克隆 ~4.7MB / `.git` ~3.4MB）。
 
 演进记录（供查证）：09-06 产物首次入库 → 09-18 曾决策「最终快照随仓库分发」→ **09-21 用
 `git filter-branch --index-filter 'git rm -r --cached --ignore-unmatch 产物'` 自全部 40 个提交剔除
@@ -596,7 +596,7 @@ python sync_github.py                   # 6. 同步代码+数据到 GitHub（--d
 
 ### 同步纪律与不可用通道（2026-09-22 定；分发策略与网络实测见上节）
 
-- **主仓库 `conditional-keystroke-timing`**：只放**代码 + 采集数据 + README**（13 文件 / 44 提交 / `.git` ~3.0MB）。同步脚本 `sync_github.py` **单通道**（清单 `SYNC_FILES`），同步副本 `D:/conditional-keystroke-timing`，远端用 **SSH**（本机 HTTPS 会被 reset）。
+- **主仓库 `conditional-keystroke-timing`**：只放**代码 + 采集数据 + README**（13 文件 / 45 提交 / `.git` ~3.4MB）。同步脚本 `sync_github.py` **单通道**（清单 `SYNC_FILES`），同步副本 `D:/conditional-keystroke-timing`，远端用 **SSH**（本机 HTTPS 会被 reset）。
 - **产物不入 git、不发布**：只在本机 `产物/`（OneDrive 规范源）保留**最新一份**，下游 calc-schema / chai 直接读该目录。仓库 `.gitignore` 保留 `产物/` 规则作安全网。
 - 规则：改完方案/脚本先跑 `python sync_github.py`（+ `--dry-run` 预览）；**同步后必须 `git ls-files` 核验实际入库**（.gitignore 曾静默吞文件）。
 - 不可用通道（2026-09-21 实测，勿重试）：GitHub Release 附件（gh 会把非 ASCII 附件名改成 `default.npz`；下载 `release-assets.githubusercontent.com` 1/2 次 TLS 超时、1 次静默截断）· 独立产物仓库（09-22 废弃）。
