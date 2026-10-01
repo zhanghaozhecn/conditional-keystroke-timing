@@ -21,11 +21,18 @@
 - 试次结束统一延迟 300-800ms 随机（打断节律，防止预期性击键压缩当量差异）
 - Esc→退出
 - trial 序号在 session 内自增（疲劳建模用），退出重置
+- 输入法: **无视输入法状态**（2026-10-01）—— 进程级 `ImmDisableIME(0)`（建窗前）+ 窗口级
+  `ImmAssociateContext(hwnd, NULL)` 摘除（建窗后, 激活时与每 2 s 重摘）。中文态下字母不再被 IME
+  拿去组字（此前 <KeyPress> 的 char 为空 ⇒ 判定"没有按键", 且会输出汉字/弹候选框）。
+  实现见 `采集输入层.py`；排障可 `--no-ime` 关掉（回到旧行为）。
 """
-import sys, time, random
+import sys, time, random, argparse
 from collections import defaultdict
 from pathlib import Path
 import tkinter as tk
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))      # 同目录共用模块 (采集输入层)
+from 采集输入层 import ime_disable_process, ImeGuard
 
 OUT = Path(__file__).resolve().parent / "数据" / "击键测速数据.tsv"  # 2026-09-05 目录重组 + 去本机绝对路径
 LETTERS = 'abcdefghijklmnopqrstuvwxyz;,./'  # 30 键 (3 行 10 列完整 QWERTY)
@@ -72,7 +79,11 @@ def _load_pair_pool(path, code_len):
     return counts
 
 class SpeedTest:
-    def __init__(self):
+    def __init__(self, ime=True):
+        self.ime = ime
+        if ime:
+            # ③ 进程级禁用 IME: MSDN 硬约束 = 必须在建第一个顶层窗口之前 (返回 False 无害)
+            self.ime_ok = ime_disable_process()
         self.root = tk.Tk()
         self.root.title("击键测速")
         self.root.geometry("550x420")
@@ -127,6 +138,11 @@ class SpeedTest:
         self._write_header()
         self.new_code()
         self.root.focus_set()
+        # ② 窗口级摘除 IME (建窗后; 激活时与每 2 s 重摘一次)
+        self.ime_guard = ImeGuard(self.root) if ime else None
+        if ime:
+            print(f"[输入法] 进程级 ImmDisableIME(0) → {self.ime_ok}; "
+                  f"窗口级摘除 {self.ime_guard.n_detached} 个窗口 (激活/每 2 s 重摘)")
 
     def _write_header(self):
         if not self._header_written:
@@ -334,8 +350,16 @@ class SpeedTest:
         self.root.after(delay_ms, self.new_code)
 
     def run(self):
-        self.root.mainloop()
+        try:
+            self.root.mainloop()
+        finally:
+            if self.ime_guard is not None:
+                self.ime_guard.stop()
 
 
 if __name__ == "__main__":
-    SpeedTest().run()
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--no-ime", action="store_true",
+                    help="排障: 不摘除/不禁用输入法（中文输入法态下可能收不到按键）")
+    args = ap.parse_args()
+    SpeedTest(ime=not args.no_ime).run()

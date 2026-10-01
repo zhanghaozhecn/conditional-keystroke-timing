@@ -29,10 +29,17 @@
 反馈 (2026-09-06): 状态栏实时显示 本次打开已采集错误 episode 数 (episode 闭合写入即 +1,
   中途退出的截断 episode 不计) + 当前串速度 = 正确字母按键数 / 自本串首键累计时长
   (错按/退格不计字母但耗时计入 → 有效吞吐口径; ≥5 个正确字母起显示)。
+输入法 (2026-10-01): **无视输入法状态** —— 进程级 `ImmDisableIME(0)` (建窗前) + 窗口级
+  `ImmAssociateContext(hwnd, NULL)` 摘除 (建窗后, 激活时与每 2 s 重摘)。中文态下字母不再被 IME
+  拿去组字 (此前 `event.char` 为空 ⇒ 字母/退格都收不到, 且 IME 会输出汉字/弹候选框)。
+  实现见 `采集输入层.py`; 排障可 `--no-ime` 关掉。
 """
-import sys, time, random
+import sys, time, random, argparse
 from pathlib import Path
 import tkinter as tk
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))      # 同目录共用模块 (采集输入层)
+from 采集输入层 import ime_disable_process, ImeGuard
 
 OUT = Path(__file__).resolve().parent / "数据" / "错误修正时间-错误键.tsv"
 LETTERS = 'abcdefghijklmnopqrstuvwxyz;,./'  # 30 键 (与主采集一致)
@@ -48,7 +55,11 @@ def _wrap(s):
 
 
 class CostCollector:
-    def __init__(self):
+    def __init__(self, ime=True):
+        self.ime = ime
+        if ime:
+            # ③ 进程级禁用 IME: MSDN 硬约束 = 必须在建第一个顶层窗口之前 (返回 False 无害)
+            self.ime_ok = ime_disable_process()
         self.root = tk.Tk()
         self.root.title("错误修正时间采集（连续输入 + 回退纠错）")
         self.root.geometry("980x600")
@@ -93,6 +104,11 @@ class CostCollector:
         self._write_header()
         self._new_stream()
         self.root.focus_set()
+        # ② 窗口级摘除 IME (建窗后; 激活时与每 2 s 重摘一次)
+        self.ime_guard = ImeGuard(self.root) if ime else None
+        if ime:
+            print(f"[输入法] 进程级 ImmDisableIME(0) → {self.ime_ok}; "
+                  f"窗口级摘除 {self.ime_guard.n_detached} 个窗口 (激活/每 2 s 重摘)")
 
     def _write_header(self):
         if not OUT.exists():
@@ -216,6 +232,8 @@ class CostCollector:
         # 中途退出: 已开打的串写汇总行 (开敞 episode 计入截断)
         if self.phase == "typing" and self.n_press:
             self._write_sum()
+        if self.ime_guard is not None:
+            self.ime_guard.stop()
         self.root.destroy()
 
     def _refresh(self):
@@ -243,8 +261,16 @@ class CostCollector:
                      f"已完成 {self.done_count} · 本次错误 {self.sess_ep_count} · 速度 {spd} 字母/s")
 
     def run(self):
-        self.root.mainloop()
+        try:
+            self.root.mainloop()
+        finally:
+            if self.ime_guard is not None:
+                self.ime_guard.stop()
 
 
 if __name__ == "__main__":
-    CostCollector().run()
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--no-ime", action="store_true",
+                    help="排障: 不摘除/不禁用输入法（中文输入法态下可能收不到按键）")
+    args = ap.parse_args()
+    CostCollector(ime=not args.no_ime).run()
