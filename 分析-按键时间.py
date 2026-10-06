@@ -11,7 +11,14 @@
 (如 3键seg2 与 4键seg3 同签名 (有前键,无后键))。实现 = φ19 = φ15 + [i==2, i==3,
 L==3, L==4]; 3 键进训练池 (train4+train3+train2)。依据 实验/实验-段位特征.py 三刷:
 T₃ 总MAE −1.2~−1.6ms、T₄ −0.3~−0.5ms、T₂ 恒零 (同号显著, 两种测试划分)。
-神经分量: 双线性交互(e_p,e_a,e_b) 3 项 + MLP([e_p;e_a;e_b;φ19]) 79→128→64→1 + Dropout0.2
+**pa/pb 几何块 (v5, 2026-10-07 用户决策「落地新几何」)**: φ36 = φ19 + [存在(prev) + φ8(prev,a) + φ8(prev,b)]
+(17 维; 存在位只一个 —— pa/pb 的存在性同为「prev 是否为空」, 两列恒等, 见 phi_geo)。pa/pb 此前只有嵌入双线性 W₁/W₃、无几何; 消融
+(实验/实验-四对几何特征消融.py 17 臂 + 实验-六对特征两批复核.py) 显示整对去掉 pa 代价
+T₄ +0.61/T₃ +0.88、bn +1.13/+1.08, 而 pa/pb 的 8 个几何特征逐一 LOO 使验证段 MAE 8/8
+全部变差 (冗余但无一可删) → 全 8 保留。**pn 不加** (T₄ +0.01/T₃ +1.26 纯负担);
+**an 中性偏优** (可去, 但维持现状 φsuc 部分几何无代价); bn 维持部分几何 (扩到全 8 无增益)。
+跨独立种子批复核: T₄ −0.83/−0.40、T₃ −3.40/−3.47 (同号)。KJ_GEO=0 可退化 φ19 供自检。
+神经分量: 双线性交互(e_p,e_a,e_b) 3 项 + MLP([e_p;e_a;e_b;φ]) 79/96→128→64→1 + Dropout0.2
   (v3.1, 2026-09-02 采纳 d20w128: deep2 加深(v3)再放宽+Dropout — 部署级 blend 总 −0.96,
   dropout 使 5 成员去相关、集成收益放大, 实验-MLP调参.py 第四轮)
   φ15 = φ8(a,b) 几何 + φsuc7 后键特征 [存在, 同手(b,n), 同指(b,n), 同键(b,n),
@@ -149,7 +156,16 @@ def role_of(code_idx):
     """(码长, 段位) → 角色 id; 段位 1-based, 段数 = 码长-1"""
     return ROLE_ID[(len(code_idx), code_idx)]
 
-D_PHI = 19   # φ 宽度 = 15 (φ8 + φsuc7) + 4 (段位块)
+# ── pa/pb 几何块 (2026-10-07 落地, 用户决策「落地新几何」) ──
+# 依据: 实验/实验-四对几何特征消融.py (17 臂): 整对去掉 pa 代价 T₄ +0.61/T₃ +0.88/验证段 +0.39;
+#   pb T₄ 中性但 T₃ +1.67; bn 最承重 +1.13/+1.08; **an 中性偏优 (可去)**;
+#   pa/pb 的 8 个几何特征逐一 LOO → 验证段 MAE 8/8 全部变差 (冗余但无一可删), T₄ 上全在噪声内。
+#   pn 一律不加 (T₄ +0.01 / T₃ +1.26 纯负担); an/bn 维持 φsuc 部分几何 (扩到全 8 无增益:
+#   PARTIAL an T₄ −0.19 / PARTIAL bn +0.02)。
+# 复核: 实验/实验-六对特征两批复核.py — T₄ −0.83/−0.40、T₃ −3.40/−3.47 (两独立种子批同号)。
+# KJ_GEO=0 → 退化旧配置 φ19 (供管线改动后的「旧配置精确复现」自检, 见项目记忆 09-21 教训)。
+GEO_ON = os.environ.get("KJ_GEO", "1") != "0"
+D_PHI = 19 + (17 if GEO_ON else 0)   # φ 宽度 = 15 (φ8 + φsuc7) + 4 (段位块) + [存在(prev) + φ8(prev,a) + φ8(prev,b)]
 
 def _precompute_phi():
     """φ(a,b) 8 维 — 2026-08-11 文献特征扩展 (实验-特征扩展.py):
@@ -206,6 +222,25 @@ def phi_suc(a, b, n):
     out[real, 6] = _SUC_FITTS[a, nc][real]
     return out
 
+def phi_geo(prev, a, b):
+    """pa/pb 几何块 (2026-10-07 落地): [存在(prev), φ8(prev,a), φ8(prev,b)] = 17 维。
+    prev 为 EMPTY(30) 时整块为 0 (首段无前键 —— 与数据一致: 首段 prev 恒空)。
+    **只用一个存在位**: pa 与 pb 的存在性同为「prev 是否为空」, 两列逐元素相同
+    (2026-10-07 用户指出, 实测 18394 段全等) —— 重复列对神经分支严格共线、对 XGB 只是
+    抽样扰动, 故合并为一列 (18→17)。该位其实也可由几何推出 (真实键对的 φ8 不可能全零:
+    列距=0 ⟹ 同列 ⟹ 同指 ⟹ 同手=1), 但保留显式指示位更省样本, 与 φsuc 的 存在(n) 同约定。
+    a/b 恒为真实键 (调用点保证)。GEO_ON=False 时返回 0 列 (旧配置 φ19)。"""
+    prev, a, b = np.asarray(prev), np.asarray(a), np.asarray(b)
+    if not GEO_ON:
+        return np.zeros((len(prev), 0), dtype=np.float32)
+    ok = prev < len(LETTERS)
+    out = np.zeros((len(prev), 17), dtype=np.float32)
+    pi = np.where(ok, prev, 0)
+    out[ok, 0] = 1.0
+    out[ok, 1:9] = PHI_MAT[pi[ok], a[ok]]
+    out[ok, 9:17] = PHI_MAT[pi[ok], b[ok]]
+    return out
+
 # ═══════════════════ 模型 ═══════════════════
 
 class RMSNorm(nn.Module):
@@ -221,21 +256,27 @@ class _SegModel(nn.Module):
     ids 约定: (B,4) [prev, a, b, n]。基类不含参数, 不影响 state_dict 键名。"""
     @property
     def _dev(self): return next(self.mlp.parameters()).device
-    def seg(self, prev, a, b, nxt=None):
-        """单段预测 (字符串输入; prev=None 表空前键, nxt=None 表无后继=词末)"""
-        ids = torch.tensor([[EMPTY if prev is None else KEY_TO_IDX[prev],
-                             KEY_TO_IDX[a], KEY_TO_IDX[b],
-                             EMPTY if nxt is None else KEY_TO_IDX[nxt]]])
-        ph = torch.tensor([np.concatenate([PHI[(a,b)], phi_suc(
-            [KEY_TO_IDX[a]], [KEY_TO_IDX[b]],
-            [EMPTY if nxt is None else KEY_TO_IDX[nxt]])[0]])], dtype=torch.float32)
-        return self._batch(ids, ph).item()
+    def seg(self, prev, a, b, nxt=None, role=ROLE_ID[(2, 1)]):
+        """单段预测 (字符串输入; prev=None 表空前键, nxt=None 表无后继=词末)。
+        role 默认 T₂ 角点角色 —— 2026-10-07 起 φ 含段位块与 pa/pb 几何块, 二者都依赖
+        (码长, 段位); 裸调用给不出段位, 故默认角点。需要精确语义请用 total()/tri_total()。"""
+        pid = EMPTY if prev is None else KEY_TO_IDX[prev]
+        nid = EMPTY if nxt is None else KEY_TO_IDX[nxt]
+        ids = torch.tensor([[pid, KEY_TO_IDX[a], KEY_TO_IDX[b], nid]])
+        ph = torch.tensor(np.concatenate([
+            PHI[(a, b)], phi_suc([KEY_TO_IDX[a]], [KEY_TO_IDX[b]], [nid])[0],
+            phi_role([role])[0], phi_geo([pid], [KEY_TO_IDX[a]], [KEY_TO_IDX[b]])[0]]
+        )[None, :].astype(np.float32))
+        return self._batch(ids, ph[:, :model_dphi(self)]).item()
     def tri_total(self, abc):
-        a,b,c = abc
-        return self.seg(None,a,b,c) + self.seg(a,b,c)
+        a, b, c = abc
+        return (self.seg(None, a, b, c, ROLE_ID[(3, 1)]) +
+                self.seg(a, b, c, None, ROLE_ID[(3, 2)]))
     def total(self, code):
-        a,b,c,d = code
-        return self.seg(None,a,b,c) + self.seg(a,b,c,d) + self.seg(b,c,d)
+        a, b, c, d = code
+        return (self.seg(None, a, b, c, ROLE_ID[(4, 1)]) +
+                self.seg(a, b, c, d, ROLE_ID[(4, 2)]) +
+                self.seg(b, c, d, None, ROLE_ID[(4, 3)]))
     def nparam(self): return sum(p.numel() for p in self.parameters())
     def save(self, path): torch.save(self.state_dict(), path)
     def load(self, path): self.load_state_dict(torch.load(path, weights_only=True))
@@ -341,18 +382,26 @@ class BlendModel:
         x = torch.from_numpy(self.xgb.predict(design_matrix(
             ids_np[:, 0], ids_np[:, 1], ids_np[:, 2], ids_np[:, 3], ph_np)).astype(np.float32))
         return W_XGB * x + (1 - W_XGB) * d
-    # ── 单查询接口 (与 _SegModel 同形) ──
-    def seg(self, prev, a, b, nxt=None):
-        ids = torch.tensor([[EMPTY if prev is None else KEY_TO_IDX[prev],
-                             KEY_TO_IDX[a], KEY_TO_IDX[b],
-                             EMPTY if nxt is None else KEY_TO_IDX[nxt]]])
-        ph = torch.tensor([np.concatenate([PHI[(a, b)], phi_suc(
-            [KEY_TO_IDX[a]], [KEY_TO_IDX[b]],
-            [EMPTY if nxt is None else KEY_TO_IDX[nxt]])[0]])], dtype=torch.float32)
-        return self._batch(ids, ph).item()
+    # ── 单查询接口 (与 _SegModel 同形; 2026-10-07 起 φ 含段位块与 pa/pb 几何块) ──
+    def seg(self, prev, a, b, nxt=None, role=ROLE_ID[(2, 1)]):
+        """单段预测; role 默认 T₂ 角点 (裸调用给不出段位, 详见 _SegModel.seg)"""
+        pid = EMPTY if prev is None else KEY_TO_IDX[prev]
+        nid = EMPTY if nxt is None else KEY_TO_IDX[nxt]
+        ids = torch.tensor([[pid, KEY_TO_IDX[a], KEY_TO_IDX[b], nid]])
+        ph = torch.tensor(np.concatenate([
+            PHI[(a, b)], phi_suc([KEY_TO_IDX[a]], [KEY_TO_IDX[b]], [nid])[0],
+            phi_role([role])[0], phi_geo([pid], [KEY_TO_IDX[a]], [KEY_TO_IDX[b]])[0]]
+        )[None, :].astype(np.float32))
+        return self._batch(ids, ph[:, :model_dphi(self)]).item()
+    def tri_total(self, abc):
+        a, b, c = abc
+        return (self.seg(None, a, b, c, ROLE_ID[(3, 1)]) +
+                self.seg(a, b, c, None, ROLE_ID[(3, 2)]))
     def total(self, code):
         a, b, c, d = code
-        return self.seg(None, a, b, c) + self.seg(a, b, c, d) + self.seg(b, c, d)
+        return (self.seg(None, a, b, c, ROLE_ID[(4, 1)]) +
+                self.seg(a, b, c, d, ROLE_ID[(4, 2)]) +
+                self.seg(b, c, d, None, ROLE_ID[(4, 3)]))
     def nparam(self): return sum(m.nparam() for m in self.members)
     def eval(self): return self   # 兼容 eval_seg 的 model.eval() (成员常驻 eval 态)
     def save(self, path_pt, path_xgb):
@@ -605,7 +654,8 @@ def residual_filter_segments(data, prev, a, b, nxt, ph, tgt, k=3.0, m0_seeds=5):
 
 def model_dphi(model):
     """模型的 φ 期望宽度 (用于构造查询特征; BlendModel 取成员; 未知则 D_PHI)。
-    部署模型恒为 D_PHI=19; 该助手让查询侧在 φ15 对照/旧权重下也能工作。"""
+    部署模型 φ36 (2026-10-07 pa/pb 几何落地); 该助手让查询侧在 φ19/φ15 旧权重下也能工作
+    (查询侧一律构造全宽 φ 再切片)。"""
     m = getattr(model, "members", [model])[0]
     return int(getattr(m, "d_phi", D_PHI))
 
@@ -632,7 +682,7 @@ def build_tensors(data):
     nxt = np.array([s[3] if isinstance(s[3], int) else KEY_TO_IDX[s[3]] for s in segs], dtype=np.int64)
     ph8 = np.array([PHI[(s[1], s[2])] for s in segs], dtype=np.float32)
     role = np.array([s[5] for s in segs], dtype=np.int64)
-    ph = np.concatenate([ph8, phi_suc(a, b, nxt), phi_role(role)], axis=1)
+    ph = np.concatenate([ph8, phi_suc(a, b, nxt), phi_role(role), phi_geo(prev, a, b)], axis=1)
     tgt = np.array([s[4] for s in segs], dtype=np.float32)
     return prev, a, b, nxt, ph, tgt
 
@@ -715,7 +765,8 @@ def total_preds(model, data):
             ids.append([pv, ix, iy, nx])
             phs.append(np.concatenate([PHI[(code[i], code[i + 1])],
                                        phi_suc([ix], [iy], [nx])[0],
-                                       phi_role([ROLE_ID[(n, i + 1)]])[0]]))
+                                       phi_role([ROLE_ID[(n, i + 1)]])[0],
+                                       phi_geo([pv], [ix], [iy])[0]]))
     model.eval()
     ph = np.array(phs, dtype=np.float32)[:, :model_dphi(model)]
     with torch.no_grad():
@@ -760,7 +811,8 @@ def build_seg_table(model, chunk=100_000):
                 p_, a_, b_, n_ = cell(t)
                 pv[r], av[r], bv[r], nv[r] = p_, a_, b_, n_
             rid = np.full(len(tup), ROLE_ID[role], np.int64)
-            ph = np.concatenate([PHI_MAT[av, bv], phi_suc(av, bv, nv), phi_role(rid)], axis=1)
+            ph = np.concatenate([PHI_MAT[av, bv], phi_suc(av, bv, nv), phi_role(rid),
+                                 phi_geo(pv, av, bv)], axis=1)
             pred = np.empty(len(tup), np.float32)
             phw = ph[:, :model_dphi(model)]        # 按模型宽度取 (部署恒 19)
             for s in range(0, len(tup), chunk):
@@ -779,7 +831,8 @@ def _bigram_ms(model):
     rid = np.full(n * n, ROLE_ID[(2, 1)], np.int64)
     phs = np.concatenate([PHI_MAT[ar, br],
                           phi_suc(ar, br, np.full(n * n, EMPTY)),
-                          phi_role(rid)], axis=1)
+                          phi_role(rid),
+                          phi_geo(np.full(n * n, EMPTY), ar, br)], axis=1)
     with torch.no_grad():
         return model._batch(ids, torch.tensor(phs[:, :model_dphi(model)])).numpy().reshape(n, n)
 
