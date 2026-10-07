@@ -349,13 +349,21 @@ W_XGB = 0.3   # 混合权重: 0.3×XGB + 0.7×(deep2 五种子平均) — 实验
 XGB_PARAMS = dict(n_estimators=500, learning_rate=0.06, max_depth=6,
                   subsample=0.8, colsample_bytree=0.8, tree_method="hist",
                   random_state=0, n_jobs=-1, verbosity=0)
+DM_OH_COLS = 122        # 独热列数 (prev 31 + a 30 + b 30 + nxt 31; 见 design_matrix) — 旧权重为 124
 
 def design_matrix(prev, a, b, nxt, ph):
-    """XGB 设计矩阵: 独热(p,a,b,n 各31列=30字母+∅) 124 + φ36 = 160 维"""
+    """XGB 设计矩阵: 独热(prev 31 + a 30 + b 30 + nxt 31 = 122) + φ36 = 158 维。
+
+    **各槽基数不同 (2026-10-08 修正)**: 只有 prev / nxt 能取 ∅(=30, 首段无前键 / 末段无后继键),
+    **a、b 恒为真实键 (调用点保证) 故各只需 30 列** —— 原实现一律给 31 列, 多出的
+    a槽∅ / b槽∅ 两列在全数据上恒为 0 (实测 0/17292 非零) 且从未参与分裂 (gain 0,
+    模型实际只用到 158 列)。修正后列数 124→122: 受控对比测试段MAE 22.83 → 22.83、
+    总MAE 35.10 → 35.11 (仅 `colsample_bytree=0.8` 的抽样落点差), 训练 1.3→1.1s。
+    ⚠ 与旧权重不兼容 (列布局变了) —— `BlendModel.save` 写入 `dm=122` 属性, `load` 校验之。"""
     n = len(prev)
-    oh = np.zeros((n, 4 * 31), dtype=np.float32)
-    for j, arr in enumerate((prev, a, b, nxt)):
-        oh[np.arange(n), np.asarray(arr) + j * 31] = 1.0
+    oh = np.zeros((n, 122), dtype=np.float32)
+    for arr, off, base in ((prev, 0, 31), (a, 31, 30), (b, 61, 30), (nxt, 91, 31)):
+        oh[np.arange(n), np.asarray(arr) + off] = 1.0
     return np.concatenate([oh, np.asarray(ph).reshape(n, -1).astype(np.float32)], axis=1)
 
 def train_xgb(prev, a, b, nxt, ph, tgt):
@@ -413,7 +421,9 @@ class BlendModel:
     def save(self, path_pt, path_xgb):
         torch.save({"seeds": list(self.SEEDS),
                     "members": [m.state_dict() for m in self.members]}, path_pt)
-        self.xgb.get_booster().save_model(path_xgb)
+        bst = self.xgb.get_booster()
+        bst.set_attr(dm=str(DM_OH_COLS), phi=str(D_PHI))   # 设计矩阵指纹 (load 时校验)
+        bst.save_model(path_xgb)
     @classmethod
     def load(cls, path_pt, path_xgb):
         import xgboost as xgb
@@ -422,6 +432,11 @@ class BlendModel:
         for sd in ck["members"]:
             m = KeystrokeModel(); m.load_state_dict(sd); m.eval(); members.append(m)
         bst = xgb.Booster(); bst.load_model(path_xgb)
+        tag = bst.attr("dm")
+        if tag is not None and tag != str(DM_OH_COLS):
+            raise RuntimeError(
+                f"XGB 权重与当前设计矩阵不兼容: 权重独热列={tag}, 当前={DM_OH_COLS} "
+                f"(2026-10-08 去死列 124→122; 用 分析-按键时间.py --full 重生)")
         class _BstWrap:   # 与 sklearn 拟合对象同形 (predict(ndarray))
             def predict(self, X): return bst.inplace_predict(np.ascontiguousarray(X, dtype=np.float32))
         return cls(_BstWrap(), members)
