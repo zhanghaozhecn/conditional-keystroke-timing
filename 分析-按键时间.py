@@ -345,7 +345,7 @@ XGB_PARAMS = dict(n_estimators=500, learning_rate=0.06, max_depth=6,
                   random_state=0, n_jobs=-1, verbosity=0)
 
 def design_matrix(prev, a, b, nxt, ph):
-    """XGB 设计矩阵: 独热(p,a,b,n 各31列) 124 + φ15 = 139 维"""
+    """XGB 设计矩阵: 独热(p,a,b,n 各31列=30字母+∅) 124 + φ36 = 160 维"""
     n = len(prev)
     oh = np.zeros((n, 4 * 31), dtype=np.float32)
     for j, arr in enumerate((prev, a, b, nxt)):
