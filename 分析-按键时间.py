@@ -170,6 +170,8 @@ def role_of(code_idx):
 # KJ_GEO=0 → 退化旧配置 φ19 (供管线改动后的「旧配置精确复现」自检, 见项目记忆 09-21 教训)。
 GEO_ON = os.environ.get("KJ_GEO", "1") != "0"
 D_PHI = 19 + (17 if GEO_ON else 0)   # φ 宽度 = 15 (φ8 + φsuc7) + 4 (段位块) + [存在(prev) + φ8(prev,a) + φ8(prev,b)]
+# KJ_TRIALWISE=0 → B4b 回退逐段口径 (2026-10-08 前的老行为); 默认 1 = 整 trial 口径 (见 trialwise_keep)。
+TRIALWISE = os.environ.get("KJ_TRIALWISE", "1") != "0"
 
 def _precompute_phi():
     """φ(a,b) 8 维 — 2026-08-11 文献特征扩展 (实验-特征扩展.py):
@@ -607,6 +609,23 @@ def mad_filter_segments(data, tgt, k=3.0):
     data_full = [d for d, ok in zip(data, tri_ok) if ok]
     return keep, data_full
 
+def trialwise_keep(data, keep):
+    """逐段 keep 掩码 → **整 trial** 掩码 (段全通过才保留该 trial 的全部段)。
+
+    2026-10-08 用户决策: **B4b 的作用单位 = 整 trial**——一个 trial 内任何一段超 MAD/键对
+    围栏(或该 trial 含错, 那条在数据准入就已整体不入), 整条 trial 都不进训练/评估。
+    依据: 段模型带 4 键上下文, 同 trial 的段共享该 trial 的速度状态与上下文, 某段被判异常
+    时其余段很可能同样被污染 ⇒ 逐段剔除会把"半污染 trial"的残段喂给模型(全局 877 段,
+    占训练池保留段的 4.8%)。
+    `KJ_TRIALWISE=0` 回退逐段口径 (仅用于与历史快照对比/复现旧数字, 勿用于部署)。
+    """
+    if not TRIALWISE:
+        return keep
+    _, tri = _seg_layout(data)
+    nseg_of = np.array([len(c) - 1 for c, _ in data])
+    cnt = np.bincount(tri[keep], minlength=len(data))
+    return (cnt == nseg_of)[tri]
+
 def residual_filter_segments(data, prev, a, b, nxt, ph, tgt, k=3.0, m0_seeds=5):
     """B4b 两阶段残差剔除 (2026-08-12 落地, 实验-剔除优化/诊断/修复/终局):
       1. B0 段位 MAD 剔除 → 训 M0 (m0_seeds 验证集选优) — 干净模型提供期望行为
@@ -624,8 +643,12 @@ def residual_filter_segments(data, prev, a, b, nxt, ph, tgt, k=3.0, m0_seeds=5):
       注意: 最终 keep 仅由第 2 阶段在全数据上的键对分桶残差判定 (替换而非
       交集第 1 阶段 — keep0 只用于定义 M0 训练集; 温和离群段被键对内残差
       判定"复活"属设计行为, 属保守方向)。
+      **作用单位 = 整 trial (2026-10-08 用户决策)**: 第 1、2 阶段都经 trialwise_keep
+      升级 — 被剔段的 trial 其余段同样不入训/不入评 (见 trialwise_keep 依据);
+      升级后本函数返回的 keep 与 data_full 恒等价 (keep.sum() = 完整 trial 的段数之和),
+      "段级 n / 段数 = 总级 n" 成为精确恒等。`KJ_TRIALWISE=0` 回退逐段口径。
       返回 (keep 掩码, 三段齐全 trial 子集)。"""
-    keep0 = mad_filter_segments(data, tgt)[0]
+    keep0 = trialwise_keep(data, mad_filter_segments(data, tgt)[0])
     # M0: 段位 MAD 干净数据训练, 验证集选优 (与主训练同协议; 5 种子并行 09-09)
     outs = train_members([(s, prev[keep0], a[keep0], b[keep0], nxt[keep0], ph[keep0], tgt[keep0])
                           for s in range(m0_seeds)])
@@ -651,6 +674,7 @@ def residual_filter_segments(data, prev, a, b, nxt, ph, tgt, k=3.0, m0_seeds=5):
         mad = np.median(np.abs(v - med))
         sigma = 1.4826 * mad if mad > 0 else 1.0
         keep[idx] = v < med + k * sigma
+    keep = trialwise_keep(data, keep)     # 升级为整 trial (2026-10-08 决策; KJ_TRIALWISE=0 时不改)
     _, tri = _seg_layout(data)
     tri_ok = np.array([keep[tri == t].all() for t in range(len(data))])
     data_full = [d for d, ok in zip(data, tri_ok) if ok]
@@ -1100,7 +1124,12 @@ def main():
     #    无 best-of 选优 → 无选优抽签噪声; 测试 trial 的段不进训练, 无泄漏) ──
     prev, a, b, nxt, ph, tgt = build_tensors(data)
     keep, _ = residual_filter_segments(data, prev, a, b, nxt, ph, tgt)
-    print(f"训练池 B4b 剔除 (键对分桶带符号残差, 单侧上围栏 k=3): 保留 {int(keep.sum())}/{len(tgt)} 段 (4键+3键+2键角点)")
+    _, tri_all = _seg_layout(data)
+    n_seg_of = np.array([len(c) - 1 for c, _ in data])
+    n_trial_ok = int((np.bincount(tri_all[keep], minlength=len(data)) == n_seg_of).sum())
+    print(f"训练池 B4b 剔除 (键对分桶带符号残差, 单侧上围栏 k=3; 作用单位 = "
+          f"{'整 trial' if TRIALWISE else '逐段 [KJ_TRIALWISE=0]'}): 保留 "
+          f"{int(keep.sum())}/{len(tgt)} 段 = {n_trial_ok}/{len(data)} trial (4键+3键+2键角点)")
     prev, a, b, nxt, ph, tgt = prev[keep], a[keep], b[keep], nxt[keep], ph[keep], tgt[keep]
 
     print(f"\n=== 评估模型训练 (v3 混合: XGB {W_XGB} + deep2×{len(BlendModel.SEEDS)} 固定种子平均) ===")
