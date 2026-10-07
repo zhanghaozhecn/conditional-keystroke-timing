@@ -128,6 +128,10 @@ EMPTY = 30  # ∅ 索引 (空前键 / 无后继键, 可学习嵌入)
 # T₃ 时间偏差 −3.7→−2.0 (收窄未消除)。3 键入训是 L 特征可学的前提 (否则 L==3 恒 0)。
 ROLES = ((2, 1), (3, 1), (3, 2), (4, 1), (4, 2), (4, 3))   # (码长, 段位), 索引即角色 id
 ROLE_ID = {r: i for i, r in enumerate(ROLES)}
+# 展示名 (铁律 7): 「4键的第1、2、3段 · 3键的第1、2段 · 2键的第1段」——旧称 角点/首段/
+# 短尾/中段/长尾 仅存于历史章节; 内部键名 (seg_L2i1 等) 不变
+ROLE_NAME = {(2, 1): "2键第1段", (3, 1): "3键第1段", (3, 2): "3键第2段",
+             (4, 1): "4键第1段", (4, 2): "4键第2段", (4, 3): "4键第3段"}
 ROLE_SLICE = (("r_L2i1", (2, 1)), ("r_L3i1", (3, 1)), ("r_L3i2", (3, 2)),
               ("r_L4i1", (4, 1)), ("r_L4i2", (4, 2)), ("r_L4i3", (4, 3)))
 # 角色 → (参与索引的键数, 该角色的段在 (p,a,b,n) 上如何取用这些键)
@@ -786,6 +790,77 @@ def eval_total(model, data):
     r2 = 1 - float(np.sum(errs**2)) / max(float(np.sum((ys-ys.mean())**2)), 1e-9)
     return mae, r2
 
+# ═══════════════ 三档统一指标 (2026-10-08; 偏差 = 预测 − 实测) ═══════════════
+# 用户要求「2、3、4 键需汇报同样多的统计数据」——此前三档各报一半: T₄ 只有 段MAE/总MAE/R²
+# (偏差在 实验-数据充分性估算.py 另算)、T₂ 只有 段MAE+偏差、T₃ 只有 总MAE/偏差/R²。且
+# **T₂ 的偏差符号与 T₃/T₄ 相反** (T₂ 曾按 实测 − 预测 报)。以下把三档统一到同一函数同一
+# D 定义, 一处改动即三档同步。
+
+def corner_mad_keep(a, b, tgt, k=3.0):
+    """T₂ 角点留出的逐键对单侧 MAD 清洗 (T₂ 口径沿革, README §5.2/§5.7):
+    每键对内 med + k·1.4826·MAD 上围栏, 只删"比该键对合理预期慢"的样本——与 B4b 同精神,
+    但 2 键无段位可分故单阶段 (B4b = 段位 MAD + 键对残差两阶段)。返回 keep 掩码。"""
+    key = a.astype(np.int64) * len(LETTERS) + b.astype(np.int64)
+    keep = np.ones(len(tgt), dtype=bool)
+    for kk in np.unique(key):
+        m = key == kk
+        v = tgt[m]
+        med = np.median(v); mad = np.median(np.abs(v - med))
+        sig = 1.4826 * mad if mad > 0 else 1.0
+        keep[m] = v < med + k * sig
+    return keep
+
+def bias_triplet(model, data, prev, a, b, nxt, ph, tgt, keep):
+    """T₂/T₃/T₄ **统一三档指标** — 三档字段与定义完全一致, 由本函数唯一实现。
+
+    **偏差 (bias) 定义, 此后全项目唯一约定: 偏差 = 预测 − 实测 (ms)**;
+    负 = 模型低估 (预测比实测快), 正 = 模型高估。三层一次算齐, 彼此自洽
+    (总级偏差 = 段级偏差在同一 trial 内按段求和后取均值):
+      总级 — 逐 trial (预测总时间 − 实测总时间), 只取段全保留的 trial (i.e. 保留口径 trial)
+      段级 — 逐段样本 (预测段时长 − 实测段时长), n = 保留段数
+      段位 — 按段角色分解段级偏差 (T₂ 只有一个角色, 恒等于段级)
+    SE 一律 = 该层误差的 SD/√n (误差 SD 用 ddof=1); z = 偏差/SE。
+
+    ⚠ 两处易混的符号, 勿改:
+      · B4b 内部残差**反号** (r = 实测 − 预测, 正 = 比预期慢) —— 那是单侧上围栏的
+        过滤判据 (只删偏慢段), 与报表偏差是两回事;
+      · T₂ 在 2026-10-08 之前按 实测 − 预测 报 (与 T₃/T₄ 反号), 同日统一为本定义 ⇒
+        历史文档里的 T₂ 偏差值须取反后与本节比较 (幅值不变)。
+      段时 = 按键间 delta ⇒ 段级残差之和 = 总级残差 (B4b 掩码外逐位成立)。
+    """
+    ids = torch.tensor(np.stack([prev, a, b, nxt], axis=1))
+    model.eval()
+    with torch.no_grad():
+        pred = model._batch(ids, torch.tensor(ph)).numpy()
+    r_seg = pred[keep] - tgt[keep]
+    rid, tri = _seg_layout(data)
+    rid_k, tri_k = rid[keep], tri[keep]
+    nseg_of = np.array([len(c) - 1 for c, _ in data])
+    ok = np.bincount(tri_k, minlength=len(data)) == nseg_of     # 段全保留的 trial (保留口径)
+    y = np.array([ts[len(c) - 2] for c, ts in data])            # 实测总时间 = 末段累计时
+    r_tot = (np.bincount(tri_k, weights=pred[keep], minlength=len(data)) - y)[ok]
+    yk = y[ok]
+    return dict(
+        n=int(ok.sum()), n_seg=len(r_seg),
+        mae=float(np.abs(r_tot).mean()), mae_seg=float(np.abs(r_seg).mean()),
+        r2=1 - float(np.sum(r_tot ** 2)) / max(float(np.sum((yk - yk.mean()) ** 2)), 1e-9),
+        bias=float(r_tot.mean()), se=float(r_tot.std(ddof=1) / np.sqrt(len(r_tot))),
+        med=float(np.median(r_tot)),
+        bias_seg=float(r_seg.mean()), se_seg=float(r_seg.std(ddof=1) / np.sqrt(len(r_seg))),
+        roles=[(int(r), float(r_seg[rid_k == r].mean()), int((rid_k == r).sum()))
+               for r in np.unique(rid_k)])
+
+def print_triplet(tag, label, d, note=""):
+    """三档统一报表 (字段顺序三档完全一致): n / 段MAE / 总MAE / R² / 偏差±SE / 段位分解"""
+    z = d["bias"] / d["se"] if d["se"] > 0 else 0.0
+    print(f"\n--- {tag} ({label}) {note}")
+    print(f"  总级: n={d['n']:5d} trial  总MAE={d['mae']:5.1f}ms  R²={d['r2']:+.3f}  "
+          f"偏差={d['bias']:+6.2f}±{d['se']:.2f}ms (z={z:+.2f}, 中位 {d['med']:+.1f})")
+    print(f"  段级: n={d['n_seg']:5d} 段    段MAE={d['mae_seg']:5.1f}ms  "
+          f"偏差={d['bias_seg']:+6.2f}±{d['se_seg']:.2f}ms")
+    print("  段位偏差: " + " | ".join(
+        f"{ROLE_NAME[ROLES[r]]} {v:+.1f} (n={n})" for r, v, n in d["roles"]))
+
 # ═══════════════════ 导出 ═══════════════════
 
 def build_seg_table(model, chunk=100_000):
@@ -1034,53 +1109,35 @@ def main():
         print(f"  seed {s}: 段MAE={seg_mae:5.1f}ms  验证段MAE={va_mae:5.1f}ms")
     blend_m = BlendModel(train_xgb(prev, a, b, nxt, ph, tgt), [m for m, _, _ in outs])
 
-    # ── 主指标: 保留口径 (2026-08-26 起默认只展示保留口径, 全口径需时另行说明) ──
+    # ── 三档统一指标 (2026-10-08 用户要求「2、3、4 键需汇报同样多的统计数据」) ──
+    #    偏差 = 预测 − 实测 (负 = 模型低估), 三档同函数同字段 ⇒ 定义见 bias_triplet
+    print(f"\n=== 主指标: 三档统一报表 (固定 trial 留出池, 偏差 = 预测 − 实测, 负 = 低估) ===")
+    print(f"    v3 混合 {blend_m.nparam()} 参数×5+XGB; T₄/T₃ 走 B4b 保留口径, T₂ 走逐键对单侧 MAD 清洗")
+
+    # T₄ (主指标 / 保留口径)
     tp, ta, tb, tn, tph, tt = build_tensors(test_data)
     tkeep, test_full = residual_filter_segments(test_data, tp, ta, tb, tn, tph, tt)
-    print(f"测试集 B4b: 保留 {int(tkeep.sum())}/{len(tt)} 段, 完整 trial {len(test_full)}/{len(test_data)}")
-    seg_keep = eval_seg(blend_m, tp[tkeep], ta[tkeep], tb[tkeep], tn[tkeep], tph[tkeep], tt[tkeep])
-    tot_keep, r2_keep = eval_total(blend_m, test_full)
-    print(f"\n=== 主指标 (固定 trial 测试集 {len(test_data)}, 保留口径, v3 混合 {blend_m.nparam()} 参数×5+XGB) ===")
-    print(f"保留口径: 段MAE={seg_keep:5.1f}  总MAE={tot_keep:5.1f}  R²={r2_keep:+.3f}")
+    d4 = bias_triplet(blend_m, test_data, tp, ta, tb, tn, tph, tt, tkeep)
+    seg_keep, tot_keep, r2_keep = d4["mae_seg"], d4["mae"], d4["r2"]    # 下游/文档引用名
+    print_triplet("T₄", "4 键留出 × B4b 保留口径", d4,
+                  f"[B4b 保留 {d4['n_seg']}/{len(tt)} 段, 完整 trial {len(test_full)}/{len(test_data)}]")
 
-    # ── T₂ 角点指标 (2 键留出 trial, 逐键对单侧 MAD 清洗后对比角点预测; 非循环) ──
-    if pools["test2"]:
-        from collections import defaultdict
-        pv = defaultdict(list)
-        for code, ts in pools["test2"]:
-            pv[(KEY_TO_IDX[code[0]], KEY_TO_IDX[code[1]])].append(ts[0])
-        B = _bigram_ms(blend_m)
-        errs, diffs = [], []
-        for (i, j), v in pv.items():
-            v = np.array(v)
-            med = np.median(v); mad = np.median(np.abs(v - med))
-            sig = 1.4826 * mad if mad > 0 else 1.0
-            c = v[v < med + 3 * sig]
-            errs += list(np.abs(c - B[i, j])); diffs += list(c - B[i, j])
-        errs, diffs = np.array(errs), np.array(diffs)
-        print(f"角点指标 (T₂ 留出 n={len(errs)}): 段MAE={errs.mean():5.1f}  偏差={diffs.mean():+5.1f} (中位 {np.median(diffs):+.1f})")
-
-    # ── T₃ 留出指标 (3 键 test3 = 20% 稳定期 3 键 trial; 09-21 段位落地后 3 键入训,
-    #    test3 成干净留出 — 补齐旧管线「3 键无留出」的评估空位) ──
+    # T₃ 留出 (3 键 test3 = 20% 稳定期 3 键 trial; 09-21 段位落地后 3 键入训 → 干净留出)
     if pools["test3"]:
         k3p, k3a, k3b, k3n, k3ph, k3t = build_tensors(pools["test3"])
         k3keep, test3_full = residual_filter_segments(pools["test3"], k3p, k3a, k3b, k3n, k3ph, k3t)
-        if test3_full:
-            mae3, r23 = eval_total(blend_m, test3_full)
-            pred3 = total_preds(blend_m, test3_full)
-            y3 = np.array([ts[1] for _, ts in test3_full])
-            pos3, _ = _seg_layout(pools["test3"])
-            ids3 = torch.tensor(np.stack([k3p[k3keep], k3a[k3keep], k3b[k3keep], k3n[k3keep]], axis=1))
-            with torch.no_grad():
-                seg3 = blend_m._batch(ids3, torch.tensor(k3ph[k3keep])).numpy()
-            b3 = seg3 - k3t[k3keep]
-            r3 = pos3[k3keep]
-            print(f"T₃ 指标 (3 键留出 n={len(test3_full)}): 总MAE={mae3:5.1f}  "
-                  f"偏差={float((pred3-y3).mean()):+5.1f} (中位 {np.median(pred3-y3):+.1f})  R²={r23:+.3f}")
-            print(f"  段位偏差分解: 首段 L3i1 {b3[r3 == ROLE_ID[(3, 1)]].mean():+5.1f}ms "
-                  f"(n={int((r3 == ROLE_ID[(3, 1)]).sum())})  |  "
-                  f"短尾 L3i2 {b3[r3 == ROLE_ID[(3, 2)]].mean():+5.1f}ms "
-                  f"(n={int((r3 == ROLE_ID[(3, 2)]).sum())})")
+        if len(k3t):
+            d3 = bias_triplet(blend_m, pools["test3"], k3p, k3a, k3b, k3n, k3ph, k3t, k3keep)
+            print_triplet("T₃", "3 键留出 × B4b 保留口径", d3,
+                          f"[B4b 保留 {d3['n_seg']}/{len(k3t)} 段, 完整 trial {len(test3_full)}/{len(pools['test3'])}]")
+
+    # T₂ 角点 (2 键留出; 逐键对单侧 MAD 清洗 — 2 键单段=整串, 故段级与总级同集)
+    if pools["test2"]:
+        p2p, p2a, p2b, p2n, p2ph, p2t = build_tensors(pools["test2"])
+        k2 = corner_mad_keep(p2a, p2b, p2t)
+        d2 = bias_triplet(blend_m, pools["test2"], p2p, p2a, p2b, p2n, p2ph, p2t, k2)
+        print_triplet("T₂", "2 键留出 × 逐键对单侧 MAD 清洗", d2,
+                      f"[保留 {int(k2.sum())}/{len(p2t)} trial; 单段=整串 ⇒ 段级与总级同集]")
 
     # ── 陈一凡表对比 (内嵌 2026-09-09, README §5.3; 评估模型 in-memory, 无重训无中间产物) ──
     if CHEN_TXT.exists() and test_full:
