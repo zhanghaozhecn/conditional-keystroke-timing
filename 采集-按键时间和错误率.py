@@ -290,10 +290,14 @@ class SpeedTest:
 
         self.recorded += 1
 
-        # 显示
+        # 显示: 只给时间 (2026-10-08 用户要求) —— 段时 = 按键间 delta
+        #   2 键 "xxms" / 3 键 "xx+xx=xxms" / 4 键 "xx+xx+xx=xxms"
+        #   等号右边取各段"显示值"之和 ⇒ 显示的等式自洽 (文件里仍写原精度, 见下方 row)
         if ok:
-            parts = [f"t{i}={ts_d[i]-ts_d[i-1]:.0f}ms" for i in range(1, n)]
-            self.label_info.config(text="  ".join(parts) + f"  T={ts_d[n-1]:.0f}ms  ✓")
+            seg = [ts_d[i] - ts_d[i - 1] for i in range(1, n)]
+            r = [int(f"{s:.0f}") for s in seg]
+            self.label_info.config(
+                text=f"{r[0]}ms" if n == 2 else "+".join(map(str, r)) + f"={sum(r)}ms")
         else:
             self.label_info.config(text=f"✗ 输入: {actual}")
         self.label_count.config(text=f"已记录: {self.recorded}")
