@@ -962,27 +962,38 @@ def load_chen():
     return d
 
 def chen_comparison(m, pools, test_full):
-    """陈一凡表对比 (README §5.3): [1] 4 码累加 (陈表 ×k₄) + [2] 2 码角点 (×k₂),
-    陈表两项各自独立比例缩放。2026-09-09 内嵌主流程 (用户决策): 直接用评估模型
-    in-memory (T₄ = total_preds / 角点 = B 切片) — 无重训、无中间产物, 与 §5.2
-    主指标严格同一模型。"""
+    """陈一凡表对比 (README §5.3) —— **三档全报** (2026-10-08 用户要求「展示 MAE 时同时展示
+    陈表归一化后的 3 项」): [1] 4 码累加 (×k₄) + [2] 2 码角点 (×k₂) + [3] 3 码累加 (×k₃),
+    陈表三档各自独立比例缩放 (k = argmin MAE, 闭式 (y·p)/Σp²)。每档末尾报领先幅度。
+    2026-09-09 内嵌主流程 (用户决策): 直接用评估模型 in-memory (总时 = total_preds /
+    角点 = B 切片) — 无重训、无中间产物, 与 §5.2 主指标严格同一模型。"""
     from collections import defaultdict
     from scipy.stats import spearmanr
     CYv = np.array([[load_chen()[(x, y)] for y in LETTERS] for x in LETTERS])
     KI = KEY_TO_IDX
+    lead = {}                              # 档 → (条件模型 scale后MAE, 陈表 scale后MAE)
+
+    def _tier(tag, y, q_cond, q_chen, cols4=True):
+        """一档对比: 两条曲线各按自身 k 缩放到实测尺度, 报 MAE/×k/scale后MAE/scale后R²/排名"""
+        print(f"\n=== 陈一凡表对比 [{tag[0]}] {tag[1]} (保留口径, n={len(y)} trial) ===")
+        print(f"  {'方法':12s} {'MAE':>7s}ms {'×k':>8s} {'scale后MAE':>10s} {'scale后R²':>9s} {'排名':>7s}")
+        mae_k = {}
+        for name, p in (("条件段模型", q_cond), ("陈一凡累加", q_chen)):
+            k = float((y * p).sum() / (p ** 2).sum())
+            errs = np.abs(p * k - y)
+            r2s = 1 - float(np.sum(errs ** 2)) / max(float(np.sum((y - y.mean()) ** 2)), 1e-9)
+            sp, _ = spearmanr(p, y)
+            mae_k[name] = errs.mean()
+            print(f"  {name:12s} {np.abs(p - y).mean():7.1f} {k:8.3f} {errs.mean():10.1f} {r2s:+9.3f} {sp:7.4f}")
+        lead[tag[0]] = mae_k
+        print(f"  → 条件段模型 scale 后领先陈表 "
+              f"{100 * (1 - mae_k['条件段模型'] / mae_k['陈一凡累加']):.0f}%")
 
     ys = np.array([ts[2] for _, ts in test_full])
     p_cond = total_preds(m, test_full)
     p_chen = np.array([CYv[KI[c[0]], KI[c[1]]] + CYv[KI[c[1]], KI[c[2]]] + CYv[KI[c[2]], KI[c[3]]]
                        for c, _ in test_full], dtype=np.float64)
-    print(f"\n=== 陈一凡表对比 [1] 4 码累加 (保留口径, n={len(test_full)} trial) ===")
-    print(f"  {'方法':12s} {'MAE':>7s}ms {'×k':>8s} {'scale后MAE':>10s} {'scale后R²':>9s} {'排名':>7s}")
-    for name, p in (("条件段模型", p_cond), ("陈一凡累加", p_chen)):
-        k = float((ys * p).sum() / (p ** 2).sum())
-        errs = np.abs(p * k - ys)
-        r2s = 1 - float(np.sum(errs ** 2)) / max(float(np.sum((ys - ys.mean()) ** 2)), 1e-9)
-        sp, _ = spearmanr(p, ys)
-        print(f"  {name:12s} {np.abs(p - ys).mean():7.1f} {k:8.3f} {errs.mean():10.1f} {r2s:+9.3f} {sp:7.4f}")
+    _tier(("1", "4 码累加"), ys, p_cond, p_chen)
 
     pv = defaultdict(list)
     for code, ts in pools["test2"]:
@@ -1006,6 +1017,20 @@ def chen_comparison(m, pools, test_full):
         sp, _ = spearmanr(p, y2)
         tag = "本征 ms" if k is None else f"×k₂={k:.1f}"
         print(f"  {name:14s}: MAE {err.mean():6.1f}ms (中位 {np.median(err):5.1f})  [{tag}]  排名 {sp:.4f}")
+    lead["2"] = {"条件段模型": np.abs(pc - y2).mean(), "陈一凡累加": np.abs(pcy * k2 - y2).mean()}
+    print(f"  → 条件段模型 scale 后领先陈表 "
+          f"{100 * (1 - lead['2']['条件段模型'] / lead['2']['陈一凡累加']):.0f}%")
+
+    # ── [3] 3 码累加 (2026-10-08 新增): 与 4 码同法, 陈表两次累加; 独立 B4b (整 trial 口径) ──
+    if pools.get("test3"):
+        k3p, k3a, k3b, k3n, k3ph, k3t = build_tensors(pools["test3"])
+        _, t3_full = residual_filter_segments(pools["test3"], k3p, k3a, k3b, k3n, k3ph, k3t)
+        if t3_full:
+            y3 = np.array([ts[1] for _, ts in t3_full])
+            q3 = total_preds(m, t3_full)
+            c3 = np.array([CYv[KI[c[0]], KI[c[1]]] + CYv[KI[c[1]], KI[c[2]]]
+                           for c, _ in t3_full], dtype=np.float64)
+            _tier(("3", "3 码累加"), y3, q3, c3)
 
 def export_seg_table(model, out_path, T=None):
     """按键时间母表 (npz) — 2026-09-21 起按段角色 6 片 (version 3; 旧版单表 F(31,30,30,31) version 2)。
