@@ -12,21 +12,37 @@
 (**2026-10-10 删冗余列后为 3 维** [i==3, L==3, L==4]; 见 phi_role 的恒等推导);
 3 键进训练池 (train4+train3+train2)。依据 实验/实验-段位特征.py 三刷:
 T₃ 总MAE −1.2~−1.6ms、T₄ −0.3~−0.5ms、T₂ 恒零 (同号显著, 两种测试划分)。
-**pa/pb 几何块 (v5, 2026-10-07 用户决策「落地新几何」)**: φ35 (2026-10-10 删除冗余列后) = 角色块 3 + 两个存在位 + φ8(a,b) 8 + φsuc7 + [φ8(prev,a) + φ8(prev,b)] 16 = 35
+**pa/pb 几何块 (v5, 2026-10-07 用户决策「落地新几何」)**: φ35 (2026-10-10) = 角色 5 + 跨键 30, 见下「φ 列序 v7」。
 (pa/pb 的存在位只一个 —— 同为「prev 是否为空」, 两列恒等, 仅在 phi_geo; 见 phi_geo)。pa/pb 此前只有嵌入双线性 W₁/W₃、无几何; 消融
 (实验/实验-四对几何特征消融.py 17 臂 + 实验-六对特征两批复核.py) 显示整对去掉 pa 代价
 T₄ +0.61/T₃ +0.88、bn +1.13/+1.08, 而 pa/pb 的 8 个几何特征逐一 LOO 使验证段 MAE 8/8
 全部变差 (冗余但无一可删) → 全 8 保留。**pn 不加** (T₄ +0.01/T₃ +1.26 纯负担);
 **an 中性偏优** (可去, 但维持现状 φsuc 部分几何无代价); bn 维持部分几何 (扩到全 8 无增益)。
 跨独立种子批复核: T₄ −0.83/−0.40、T₃ −3.40/−3.47 (同号)。KJ_GEO=0 可退化 φ19 供自检。
-神经分量: MLP([e_p;e_a;e_b;φ]) 95→128→64→1 + Dropout0.2
+**φ 列序 v7 (2026-10-10 用户决策「列置换如果与效果无关就按照新的口径」)**: φ35 的**实际张量列序
+改为与三类展示序一致** = `[角色 5: 存在(p), 存在(n), 码长==3, 码长==4, 段位==3] →
+[跨键·ab 8] → [跨键·pa 8] → [跨键·pb 8] → [跨键·bn 4] → [跨键·an 2]`
+(**键特征类 0 列**)。这是旧序 `[ab8|存在(n)|bn4|an2|段位==3,码长==3,码长==4|存在(p)|pa8|pb8]` 的
+**纯置换**（实验/实验-φ列序置换与d12落地.py 内**逐列断言 φ_new == φ_old[:, PERM] 35/35**;
+MLP 假设空间对输入置换不变 ⇒ 差异只来自初始化↔特征的对应关系）。实测（4 臂 × 两批 × 5 种子）:
+d=20 下列序效应 **+0.087±0.078（批A, 变好 1/5）/ +0.026±0.067（批B, 2/5）**、d=12 下
++0.024±0.090 / +0.085±0.096 ⇒ **幅度 ≤0.09ms、逐种子方向混杂、t 不显著 = 噪声带内**
+（项目"改 φ 必动 ~0.2ms"伪影带内）⇒ 判为「与效果无关」并落地。
+⚠ **旧 `.pt`/`-xgb.json` 不兼容**：φ 宽度与独热列数都没变，故 `BlendModel.save` 另写 **`ord` 指纹**
+（`3class`），`load` 校验并拒绝旧序权重（否则会静默错用）。
+神经分量: MLP([e_p;e_a;e_b;φ]) **71→128→64→1** + Dropout0.2
+  (**v7, 2026-10-10 用户决策「嵌入的维数改成12」**: d_embed 20 → **12**（参数 21,357 → 18,037）。
+  依据 实验/实验-嵌入维数与集成规模.py（8 维数 × 两批）: d∈[4,24] 全在同一 ±0.25ms 噪声带内、
+  d≥32 两批一致变差、**最优点 d=12**（段MAE −0.182±0.073 批A 5/5 / −0.048±0.081 批B 4/5；
+  总MAE −0.44/−0.29）; 嵌入维数本非瓶颈（30 键在 3 槽共享一张表, φ 已带键对几何）—— 见 README §4.4 ⑫)
   (**v6, 2026-10-10 用户决策**: 原 `+ 双线性交互(e_p,e_a,e_b) 3 项` 已删除 —— 两批逐种子配对显示
   它在现行 φ 特征体系下已被 φ8(ab)/φ8(pa)/φ8(pb) 键对几何替代, 删它纯神经 34.38→33.92、混合 34.01→33.63;
   见 KeystrokeModel docstring 与 README §4.4 ⑩⑪)
   (v3.1, 2026-09-02 采纳 d20w128: deep2 加深(v3)再放宽+Dropout — 部署级 blend 总 −0.96,
   dropout 使 5 成员去相关、集成收益放大, 实验-MLP调参.py 第四轮)
-  φ = φ8(a,b) 几何 + φsuc7 后键特征 [存在, 同手(b,n), 同指(b,n), 同键(b,n),
-  Fitts(b,n), 同手(a,n), Fitts(a,n)]; n=∅ 时 φsuc 全 0 (存在位=0)。
+  φ 内容 = 角色 5 + 跨键 30: φ8(a,b) 8 · φ8(prev,a) 8 · φ8(prev,b) 8 · bn 4 · an 2 ·
+  存在(p)/存在(n)/码长×2/段位==3 5（= 原 φ8 + φsuc7 + 角色块 + 几何块 的重排, 数值逐位不变）;
+  n=∅ 时后键部分全 0 (存在位=0)。
 部署形态 (v3, 2026-09-02, 用户确认采纳): BlendModel = 0.3×XGBoost(独热122+φ35)
   + 0.7×(deep2 × 固定种子 0-4 平均) — 无 best-of 选优 → 无选优抽签噪声 (决策带
   从 ±3 缩至仅测试重洗 ~±1ms); 依据 实验-架构对比3.py (09-14 当前数据重跑):
@@ -37,7 +53,7 @@ T₄ +0.61/T₃ +0.88、bn +1.13/+1.08, 而 pa/pb 的 8 个几何特征逐一 LO
   三键当量  T₃(xyz)  = R(L3i1)[x,y,z] + R(L3i2)[x,y,z]
   四键当量  T₄(wxyz) = R(L4i1)[w,x,y] + R(L4i2)[w,x,y,z] + R(L4i3)[x,y,z]
 
-键位嵌入: e_k = E[k] ∈ ℝ²⁰ (30 键各独立, 索引 30 = ∅ 前键/后键)
+键位嵌入: e_k = E[k] ∈ ℝ¹² (30 键各独立, 索引 30 = ∅ 前键/后键; **v7 2026-10-10: 20 → 12**, s. §4.4 ⑫)
 导出 (2026-09-05 起入 产物/): 按键时间表.npz — 2026-09-21 起按段角色 **6 片** (version 3;
   旧版单表 F(31,30,30,31) 无法表达同签名跨码长的角色分裂, 与错误侧 09-19 段类重参数化同因),
   附 letters/empty/roles/version 元数据; 组装当量表.py 查表组合 (段当量 = 按键时间 + 错误率×错误修正时间)。
@@ -159,7 +175,8 @@ def phi_role(role):
       **存在(p) ≡ (段位==2) + (段位==3)** (存在(p)=1 ⟺ 有前键 ⟺ 段位≥2; 恒等已在真实设计矩阵上
       逐元素验证 max|Δ|=0) ⇒ 保留 存在(p)(在 phi_geo) 就等于已把两个段位 dummy 的和放进模型
       ⇒ 段位那一对只能留一个, 且 **段位==2 ≡ 存在(p) − 段位==3** (对称式亦然, 同样 max|Δ|=0)。
-    删掉 i==2 后, 角色类 5 维 = 本块 3 + 存在(p)(phi_geo) + 存在(n)(phi_suc):
+    删掉 i==2 后, 角色类 5 维（**展示序**: 存在(p) · 存在(n) · 码长==3 · 码长==4 · 段位==3,
+      2026-10-10 晚用户统一; 与下列实际构成/本块列序正交）= 本块 3 + 存在(p)(phi_geo) + 存在(n)(phi_suc):
       · 对 6 个角色**两两可分辨** (5 元组逐角色互异);
       · 秩 = **6 = 满秩** ⇒ 6 个角色均值可自由拟合 (饱和), 而**不再含任何冗余列** ——
         原 6 维是"饱和但含 1 冗余列"(7 列装 6 维), 现 5 维是**最小饱和参数化**(6 列装 6 维)。
@@ -186,8 +203,10 @@ def role_of(code_idx):
 # 复核: 实验/实验-六对特征两批复核.py — T₄ −0.83/−0.40、T₃ −3.40/−3.47 (两独立种子批同号)。
 # KJ_GEO=0 → 去掉 pa/pb 几何块 (退化到无该块的旧配置, 供「旧配置精确复现」自检)。
 GEO_ON = os.environ.get("KJ_GEO", "1") != "0"
-D_PHI = 18 + (17 if GEO_ON else 0)   # φ35 (2026-10-10 删 段位==2 冗余列): 15 (φ8 + φsuc7)
-                                     # + 3 (角色块: 段位==3/码长==3/码长==4) + [存在(prev) + φ8(prev,a) + φ8(prev,b)]
+D_PHI = 18 + (17 if GEO_ON else 0)   # φ35 (2026-10-10): 角色 5 + 跨键 30 (15 = φ8 + φsuc7 的内容)
+                                     # v7 列序 (2026-10-10 落地, 见模块头): [角色5 | ab8 | pa8 | pb8 | bn4 | an2]
+D_EMBED = 12                         # 键位嵌入维数 (v7 2026-10-10: 20 → 12; 依据 README §4.4 ⑫)
+PHI_ORDER_TAG = "3class"             # φ 列序指纹 (v7 = 角色5|ab|pa|pb|bn|an); save/load 校验
 # KJ_TRIALWISE=0 → B4b 回退逐段口径 (2026-10-08 前的老行为); 默认 1 = 整 trial 口径 (见 trialwise_keep)。
 TRIALWISE = os.environ.get("KJ_TRIALWISE", "1") != "0"
 
@@ -294,10 +313,7 @@ class _SegModel(nn.Module):
         pid = EMPTY if prev is None else KEY_TO_IDX[prev]
         nid = EMPTY if nxt is None else KEY_TO_IDX[nxt]
         ids = torch.tensor([[pid, KEY_TO_IDX[a], KEY_TO_IDX[b], nid]])
-        ph = torch.tensor(np.concatenate([
-            PHI[(a, b)], phi_suc([KEY_TO_IDX[a]], [KEY_TO_IDX[b]], [nid])[0],
-            phi_role([role])[0], phi_geo([pid], [KEY_TO_IDX[a]], [KEY_TO_IDX[b]])[0]]
-        )[None, :].astype(np.float32))
+        ph = torch.tensor(phi_one(pid, KEY_TO_IDX[a], KEY_TO_IDX[b], nid, role)[None, :])
         return self._batch(ids, ph[:, :model_dphi(self)]).item()
     def tri_total(self, abc):
         a, b, c = abc
@@ -313,7 +329,14 @@ class _SegModel(nn.Module):
     def load(self, path): self.load_state_dict(torch.load(path, weights_only=True))
 
 class KeystrokeModel(_SegModel):
-    """对称段模型 (sym_phi deep2): 键位嵌入 (20 维) + 角色/几何 φ 特征 + 深化 MLP 头。
+    """对称段模型 (sym_phi deep2): 键位嵌入 (12 维, v7) + 角色/几何 φ 特征 + 深化 MLP 头。
+
+    **v7 (2026-10-10 用户决策「嵌入的维数改成12」)**: d_embed 20 → **12**（参数 21,357 → 18,037;
+    MLP 首层 95 → 71 = 3×12 + φ35）。依据 实验/实验-嵌入维数与集成规模.py（8 维数 × 两批受控）:
+    **d ∈ [4,24] 全落在同一 ±0.25ms 噪声带内**、d ≥ 32 两批同号一致变差、**最优点 d=12**
+    （段MAE −0.182±0.073 批A 5/5 / −0.048±0.081 批B 4/5；总MAE −0.44/−0.29；参数 −3,320）——
+    嵌入维数本非瓶颈: 30 键在 3 槽共享一张表, 键对层面的信息由 φ35 显式承载（与「e_n 是重复通道」
+    「树对 φ 的依赖是神经的 4 倍」同一结论的三个侧面）。见 README §4.4 ⑫。
 
     **v6 (2026-10-10 用户决策「删除双线性」)**: 原式的三个双线性交互项
     `e_pᵀW₁e_a + e_aᵀW₂e_b + e_pᵀW₃e_b` **已删除**（省 1,200 参数 = 3×20×20）。
@@ -335,7 +358,7 @@ class KeystrokeModel(_SegModel):
     ⇒ **维持 n 只经 φsuc 进入**, 见 README §4.4 ⑤。
     v1 依据 (实验-双线性扩容.py 等): de20 单层最优; relu 最优; RMSNorm 微增益;
     ~~W3 跨键双线性 +2.1ms~~ (该结论已被 v6 的现行特征体系推翻)。"""
-    def __init__(self, d_embed=20, d_hidden=128, p_drop=0.2, d_phi=D_PHI):
+    def __init__(self, d_embed=D_EMBED, d_hidden=128, p_drop=0.2, d_phi=D_PHI):
         super().__init__()
         self.d_phi = d_phi   # φ 宽度自适应 (2026-09-21): 段位特征实验需要 φ19, 默认 15 行为不变
         self.E_key = nn.Embedding(len(LETTERS) + 1, d_embed)  # 30 键 + ∅
@@ -438,10 +461,7 @@ class BlendModel:
         pid = EMPTY if prev is None else KEY_TO_IDX[prev]
         nid = EMPTY if nxt is None else KEY_TO_IDX[nxt]
         ids = torch.tensor([[pid, KEY_TO_IDX[a], KEY_TO_IDX[b], nid]])
-        ph = torch.tensor(np.concatenate([
-            PHI[(a, b)], phi_suc([KEY_TO_IDX[a]], [KEY_TO_IDX[b]], [nid])[0],
-            phi_role([role])[0], phi_geo([pid], [KEY_TO_IDX[a]], [KEY_TO_IDX[b]])[0]]
-        )[None, :].astype(np.float32))
+        ph = torch.tensor(phi_one(pid, KEY_TO_IDX[a], KEY_TO_IDX[b], nid, role)[None, :])
         return self._batch(ids, ph[:, :model_dphi(self)]).item()
     def tri_total(self, abc):
         a, b, c = abc
@@ -458,7 +478,7 @@ class BlendModel:
         torch.save({"seeds": list(self.SEEDS),
                     "members": [m.state_dict() for m in self.members]}, path_pt)
         bst = self.xgb.get_booster()
-        bst.set_attr(dm=str(DM_OH_COLS), phi=str(D_PHI))   # 设计矩阵指纹 (load 时校验)
+        bst.set_attr(dm=str(DM_OH_COLS), phi=str(D_PHI), ord=PHI_ORDER_TAG)   # 设计矩阵指纹 (load 时校验)
         bst.save_model(path_xgb)
     @classmethod
     def load(cls, path_pt, path_xgb):
@@ -473,6 +493,12 @@ class BlendModel:
             raise RuntimeError(
                 f"XGB 权重与当前设计矩阵不兼容: 权重独热列={tag}, 当前={DM_OH_COLS} "
                 f"(2026-10-08 去死列 124→122; 用 分析-按键时间.py --full 重生)")
+        otag = bst.attr("ord")
+        if otag is not None and otag != PHI_ORDER_TAG:
+            raise RuntimeError(
+                f"权重 φ 列序不兼容: 权重={otag}, 当前={PHI_ORDER_TAG} "
+                f"(2026-10-10 列序 v7 = 角色5|ab|pa|pb|bn|an; φ 宽度与独热列数都没变, 故单靠 "
+                f"dm/phi 指纹拦不住旧序权重 ⇒ 用 ord 显式拒绝; 用 分析-按键时间.py --full 重生)")
         class _BstWrap:   # 与 sklearn 拟合对象同形 (predict(ndarray))
             def predict(self, X): return bst.inplace_predict(np.ascontiguousarray(X, dtype=np.float32))
         return cls(_BstWrap(), members)
@@ -740,12 +766,24 @@ def model_dphi(model):
     return int(getattr(m, "d_phi", D_PHI))
 
 def build_tensors(data):
-    """全部段样本: (prev, a, b, nxt, phi15, target)。
+    """全部段样本: (prev, a, b, nxt, ph, target)。
     4 键 trial: 段 S(∅,a,b,c) / S(a,b,c,d) / S(b,c,d,∅) — 角色 (4,1)/(4,2)/(4,3);
     3 键 trial: 段 S(∅,a,b,c) / S(a,b,c,∅)           — 角色 (3,1)/(3,2);
     2 键 trial: 单段 S(∅,a,b,∅) = T₂ 角点            — 角色 (2,1)。
-    角色块 (2026-10-10 起 3 维) = [i==3, L==3, L==4]; 连同 phi_geo 的存在(p) 与 phi_suc 的
-    存在(n), 角色类 5 维对 6 角色两两可分辨且秩 6 (最小饱和参数化, 见 phi_role)"""
+    角色 5 维 = [存在(p), 存在(n), 码长==3, 码长==4, 段位==3]（存在位归角色、与三类视图同序）
+    对 6 角色两两可分辨且秩 6 (最小饱和参数化, 见 phi_role)。
+
+    **φ 列序 v7 (2026-10-10 落地)** = 与三类展示序一致:
+      [0]        存在(p)          ┐
+      [1]        存在(n)          │ 角色 5
+      [2][3][4]  码长==3, 码长==4, 段位==3 ┘
+      [5:13]     跨键·ab   = φ8(a,b)
+      [13:21]    跨键·pa   = φ8(prev,a)
+      [21:29]    跨键·pb   = φ8(prev,b)
+      [29:33]    跨键·bn   = [同手, 同指, 同键, Fitts](b,n)
+      [33:35]    跨键·an   = [同手, Fitts](a,n)           （键特征类 0 列）
+    旧序是 `[ab8|存在(n)|bn4|an2|段位==3,码长==3,码长==4|存在(p)|pa8|pb8]`，与本序**互为纯置换**
+    （逐列断言见 实验/实验-φ列序置换与d12落地.py；实测列序效应 ≤0.09ms 在噪声带内, 故采纳）。"""
     segs = []
     for code, ts in data:
         n = len(code)
@@ -763,9 +801,41 @@ def build_tensors(data):
     nxt = np.array([s[3] if isinstance(s[3], int) else KEY_TO_IDX[s[3]] for s in segs], dtype=np.int64)
     ph8 = np.array([PHI[(s[1], s[2])] for s in segs], dtype=np.float32)
     role = np.array([s[5] for s in segs], dtype=np.int64)
-    ph = np.concatenate([ph8, phi_suc(a, b, nxt), phi_role(role), phi_geo(prev, a, b)], axis=1)
+    ph = phi_assemble(prev, a, b, nxt, role, ph8)
     tgt = np.array([s[4] for s in segs], dtype=np.float32)
     return prev, a, b, nxt, ph, tgt
+
+def phi_assemble(prev, a, b, nxt, role, ph8):
+    """φ35 按 **v7 三类列序** 装配（2026-10-10 落地）——各片取自既有 helper, 数值逐位不变,
+    只改拼接顺序。唯一改动点: 换列序只改本函数（+ 模块头/TENSOR 文档), 各 helper 语义不动。
+
+    ⚠ **查询侧一律经本函数**（值用 `PHI_MAT[ai, bi]` 传入）: `_SegModel.seg` / `BlendModel.seg` /
+    `total_preds` / `build_seg_table` / `_bigram_ms` 五处曾是**行内按旧序拼接**, 落地 v7 时
+    全部改为调用本函数 —— 当时正是靠「组装自检 T₂ 149.6ms(应 52.1) / 3键第2段−4键第3段 −32.5ms」
+    当场抓到（行内拼接不跟着换序 ⇒ 新序模型被喂旧序特征, 表全错）。"""
+    suc = phi_suc(a, b, nxt)         # [存在(n), 同手(b,n), 同指(b,n), 同键(b,n), Fitts(b,n), 同手(a,n), Fitts(a,n)]
+    geo = phi_geo(prev, a, b)        # [存在(prev), φ8(prev,a)×8, φ8(prev,b)×8]
+    rl = phi_role(role)              # [段位==3, 码长==3, 码长==4]
+    return np.concatenate([
+        geo[:, 0:1],      # 角色: 存在(p)
+        suc[:, 0:1],      # 角色: 存在(n)
+        rl[:, 1:3],       # 角色: 码长==3, 码长==4
+        rl[:, 0:1],       # 角色: 段位==3
+        ph8,              # 跨键·ab (8)
+        geo[:, 1:9],      # 跨键·pa (8)
+        geo[:, 9:17],     # 跨键·pb (8)
+        suc[:, 1:5],      # 跨键·bn (4)
+        suc[:, 5:7],      # 跨键·an (2)
+    ], axis=1)
+
+
+def phi_one(prev, a, b, nxt, role):
+    """**单点查询**唯一入口（整数索引, 无 ∅ 约定: 空前键/后键一律传 EMPTY=30）:
+    返回 (35,) —— 与 build_tensors/phi_assemble 逐位一致（避免各处再手拼列序）。"""
+    prev = np.array([prev], dtype=np.int64); a = np.array([a], dtype=np.int64)
+    b = np.array([b], dtype=np.int64); nxt = np.array([nxt], dtype=np.int64)
+    role = np.array([role], dtype=np.int64)
+    return phi_assemble(prev, a, b, nxt, role, PHI_MAT[a, b])[0]
 
 # ═══════════════════ 训练 ═══════════════════
 
@@ -844,10 +914,7 @@ def total_preds(model, data):
             nx = KEY_TO_IDX[code[i + 2]] if i + 2 < n else EMPTY
             ix, iy = KEY_TO_IDX[code[i]], KEY_TO_IDX[code[i + 1]]
             ids.append([pv, ix, iy, nx])
-            phs.append(np.concatenate([PHI[(code[i], code[i + 1])],
-                                       phi_suc([ix], [iy], [nx])[0],
-                                       phi_role([ROLE_ID[(n, i + 1)]])[0],
-                                       phi_geo([pv], [ix], [iy])[0]]))
+            phs.append(phi_one(pv, ix, iy, nx, ROLE_ID[(n, i + 1)]))
     model.eval()
     ph = np.array(phs, dtype=np.float32)[:, :model_dphi(model)]
     with torch.no_grad():
@@ -972,10 +1039,9 @@ def build_seg_table(model, chunk=100_000):
                 p_, a_, b_, n_ = cell(t)
                 pv[r], av[r], bv[r], nv[r] = p_, a_, b_, n_
             rid = np.full(len(tup), ROLE_ID[role], np.int64)
-            ph = np.concatenate([PHI_MAT[av, bv], phi_suc(av, bv, nv), phi_role(rid),
-                                 phi_geo(pv, av, bv)], axis=1)
+            ph = phi_assemble(pv, av, bv, nv, rid, PHI_MAT[av, bv])
             pred = np.empty(len(tup), np.float32)
-            phw = ph[:, :model_dphi(model)]        # 按模型宽度取 (部署恒 19)
+            phw = ph[:, :model_dphi(model)]        # 按模型宽度取 (部署恒 35)
             for s in range(0, len(tup), chunk):
                 ids = torch.tensor(np.stack([pv[s:s+chunk], av[s:s+chunk],
                                              bv[s:s+chunk], nv[s:s+chunk]], axis=1))
@@ -990,10 +1056,7 @@ def _bigram_ms(model):
     ids = torch.tensor([[EMPTY, a, b, EMPTY] for a in range(n) for b in range(n)])
     ar = np.arange(n).repeat(n); br = np.tile(np.arange(n), n)
     rid = np.full(n * n, ROLE_ID[(2, 1)], np.int64)
-    phs = np.concatenate([PHI_MAT[ar, br],
-                          phi_suc(ar, br, np.full(n * n, EMPTY)),
-                          phi_role(rid),
-                          phi_geo(np.full(n * n, EMPTY), ar, br)], axis=1)
+    phs = phi_assemble(np.full(n * n, EMPTY), ar, br, np.full(n * n, EMPTY), rid, PHI_MAT[ar, br])
     with torch.no_grad():
         return model._batch(ids, torch.tensor(phs[:, :model_dphi(model)])).numpy().reshape(n, n)
 
