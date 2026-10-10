@@ -19,10 +19,13 @@ T₄ +0.61/T₃ +0.88、bn +1.13/+1.08, 而 pa/pb 的 8 个几何特征逐一 LO
 全部变差 (冗余但无一可删) → 全 8 保留。**pn 不加** (T₄ +0.01/T₃ +1.26 纯负担);
 **an 中性偏优** (可去, 但维持现状 φsuc 部分几何无代价); bn 维持部分几何 (扩到全 8 无增益)。
 跨独立种子批复核: T₄ −0.83/−0.40、T₃ −3.40/−3.47 (同号)。KJ_GEO=0 可退化 φ19 供自检。
-神经分量: 双线性交互(e_p,e_a,e_b) 3 项 + MLP([e_p;e_a;e_b;φ]) 79/96→128→64→1 + Dropout0.2
+神经分量: MLP([e_p;e_a;e_b;φ]) 95→128→64→1 + Dropout0.2
+  (**v6, 2026-10-10 用户决策**: 原 `+ 双线性交互(e_p,e_a,e_b) 3 项` 已删除 —— 两批逐种子配对显示
+  它在现行 φ 特征体系下已被 φ8(ab)/φ8(pa)/φ8(pb) 键对几何替代, 删它纯神经 34.38→33.92、混合 34.01→33.63;
+  见 KeystrokeModel docstring 与 README §4.4 ⑩⑪)
   (v3.1, 2026-09-02 采纳 d20w128: deep2 加深(v3)再放宽+Dropout — 部署级 blend 总 −0.96,
   dropout 使 5 成员去相关、集成收益放大, 实验-MLP调参.py 第四轮)
-  φ15 = φ8(a,b) 几何 + φsuc7 后键特征 [存在, 同手(b,n), 同指(b,n), 同键(b,n),
+  φ = φ8(a,b) 几何 + φsuc7 后键特征 [存在, 同手(b,n), 同指(b,n), 同键(b,n),
   Fitts(b,n), 同手(a,n), Fitts(a,n)]; n=∅ 时 φsuc 全 0 (存在位=0)。
 部署形态 (v3, 2026-09-02, 用户确认采纳): BlendModel = 0.3×XGBoost(独热122+φ35)
   + 0.7×(deep2 × 固定种子 0-4 平均) — 无 best-of 选优 → 无选优抽签噪声 (决策带
@@ -310,24 +313,33 @@ class _SegModel(nn.Module):
     def load(self, path): self.load_state_dict(torch.load(path, weights_only=True))
 
 class KeystrokeModel(_SegModel):
-    """对称段模型 (sym_phi deep2): 键位嵌入 (20 维) + φ15 + 双线性交互 3 项 + 深化 MLP 头。
+    """对称段模型 (sym_phi deep2): 键位嵌入 (20 维) + 角色/几何 φ 特征 + 深化 MLP 头。
+
+    **v6 (2026-10-10 用户决策「删除双线性」)**: 原式的三个双线性交互项
+    `e_pᵀW₁e_a + e_aᵀW₂e_b + e_pᵀW₃e_b` **已删除**（省 1,200 参数 = 3×20×20）。
+    依据: φ35 下两批逐种子配对（同 seed 同初始化流 ⇒ 只差输出端有无该 3 项）——
+    **纯神经层 T₄ 总MAE 34.38 → 33.92、混合层 34.01 → 33.63**，两批同向为负
+    （段MAE Δ −0.115±0.075 批A 4/5 / −0.172±0.079 批B 5/5）；即它在现行特征体系下
+    **已被 φ8(ab) / φ8(pa) / φ8(pb) 的显式键对几何替代**。替代性检验（`实验/实验-双线性×几何替代检验.py`）:
+    关掉 pa/pb 几何块后其价值回升（混合层 Δ 由 −0.37 转 **+0.20**，摆幅 0.57ms）⇒ 「双线性主要
+    提供 pa/pb 键对信息、而这些信息现在有特征承载」的判断成立，但幅度远小于 09-14 的 +2.1ms
+    （余差归因: 旧删法改了初始化流 + φ/口径代际）。详见 README §4.4 ⑩⑪。
     v3 (2026-09-02): MLP 64→32→1 两隐藏层 (deep2), 依据 实验-架构对比.py 稳定期重审 —
     加一层对 base 10/10 配对 −2.2~−2.5ms, v1"单层最优"为混合数据伪收敛 (实验-架构对比)。
     部署形态 = BlendModel (本类×5 固定种子平均 + XGB 0.3 混合, 见下方混合段)。
     v2 (2026-08-29): 增后键条件 — n 仅经 φsuc 特征进入 (几何身份≈嵌入身份);
     依据 实验-后键条件系列(已删, 结论存档): 对称化总MAE −1.3~−1.6。
-    **e_n 入 MLP 的复测 (2026-10-10)**: φ36 架构 + 2.7× 数据 + 无选优协议下三臂受控
-    (`实验/实验-n嵌入MLP.py`) ⇒ 仍无增益, T₄ 逐种子配对反而略差 (+0.19ms 级, 两批同号,
-    10 种子里 9 个变差)、T₂ 内建对照组同号变差 (2 键角点 n 恒 ∅ ⇒ 常量输入零信息);
+    **e_n 入 MLP 的复测 (2026-10-10)**: 当时的 φ36 架构 + 2.7× 数据 + 无选优协议下三臂受控
+    (`实验/实验-n嵌入MLP.py`) ⇒ 无增益, T₄ 逐种子配对反而略差 (+0.19ms 级, 两批同号);
     e_n 是**重复通道** (n 的身份已由 φsuc7 六个摘要 + XGB 支路 nxt 独热 31 列承载)
     ⇒ **维持 n 只经 φsuc 进入**, 见 README §4.4 ⑤。
     v1 依据 (实验-双线性扩容.py 等): de20 单层最优; relu 最优; RMSNorm 微增益;
-    W3 跨键双线性 +2.1ms。"""
+    ~~W3 跨键双线性 +2.1ms~~ (该结论已被 v6 的现行特征体系推翻)。"""
     def __init__(self, d_embed=20, d_hidden=128, p_drop=0.2, d_phi=D_PHI):
         super().__init__()
         self.d_phi = d_phi   # φ 宽度自适应 (2026-09-21): 段位特征实验需要 φ19, 默认 15 行为不变
         self.E_key = nn.Embedding(len(LETTERS) + 1, d_embed)  # 30 键 + ∅
-        self.W = nn.Parameter(torch.randn(3, d_embed, d_embed) * 0.05)  # (p,a),(a,b),(p,b)
+        # v6: 原 self.W (3,d,d) 双线性已删 (2026-10-10, 见类 docstring)
         # v3.1 d20w128: d_hidden 64→128 + Dropout 0.2 (实验-MLP调参.py 部署级 blend
         # 总 −0.96; dropout 成员去相关 → 种子平均收益放大)
         self.mlp = nn.Sequential(nn.Linear(d_embed*3+d_phi, d_hidden), nn.ReLU(),
@@ -337,15 +349,12 @@ class KeystrokeModel(_SegModel):
     @property
     def _dev(self): return next(self.mlp.parameters()).device
     def _batch(self, ids, ph):
-        """ids: (B,4) [prev,a,b,n] (n 仅经 ph 生效, 此处只嵌前 3 键), ph: (B,15)"""
+        """ids: (B,4) [prev,a,b,n] (n 仅经 ph 生效, 此处只嵌前 3 键); ph: (B, d_phi)"""
         B = ids.shape[0]
         ids = ids.to(self._dev)
         e = self.E_key(ids[:, :3])
-        # 显式二阶交互: (前键,首键), (首键,次键), (前键,次键)
-        bil = (torch.einsum('bi,ij,bj->b', e[:,0], self.W[0], e[:,1]) +
-               torch.einsum('bi,ij,bj->b', e[:,1], self.W[1], e[:,2]) +
-               torch.einsum('bi,ij,bj->b', e[:,0], self.W[2], e[:,2]))
-        mlp = self.mlp(torch.cat([e.reshape(B, -1), ph.to(self._dev).reshape(B, -1)], dim=1)).squeeze(-1)
+        return self.mlp(torch.cat([e.reshape(B, -1), ph.to(self._dev).reshape(B, -1)],
+                                  dim=1)).squeeze(-1)
         return bil + mlp
 
 class CPModel(_SegModel):
