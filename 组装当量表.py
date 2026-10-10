@@ -1,29 +1,26 @@
 #!/usr/bin/env python3
 """
-用按键时间表 + 键对错误率表 + 错误修正时间实测值组装标准产物
-（2026-08-31 定稿; 2026-09-19 术语统一 + 段类重参数化; 2026-09-21 段位特征落地）
+用按键时间表 + 错误率表 + 错误修正时间实测值组装标准产物
+（2026-08-31 定稿; 2026-09-19 术语统一 + 段类重参数化; 2026-09-21 段位特征落地;
+  2026-10-10 错误侧改 (p,a,b,n) 条件化、按段角色 6 片 —— 与时间表同构）
 
 读: 按键时间表.npz     按**段角色** 6 片 (version 3) 按键时间 S(角色,…) ms
-        角色 = (码长, 段位): L2i1=2键第1段 / L3i1·L4i1=3·4键第1段 / L3i2=3键第2段 /
-        L4i2=4键第2段 / L4i3=4键第3段 (2026-10-07 展示名; 旧称 角点/首段/短尾/中段/长尾)
+        角色 = (码长, 段位): L2i1=2键第1段 / L3i1=3键第1段 / L3i2=3键第2段 /
+        L4i1=4键第1段 / L4i2=4键第2段 / L4i3=4键第3段 (2026-10-07 展示名; 旧称 角点/首段/短尾/中段/长尾)
         (2026-09-21 段位特征落地: 同一 (p,a,b,n) 签名在 3 键与 4 键码中角色不同, 4-D 单表
-         无法表达 → 拆片; 与错误侧 09-19 段类重参数化同因。旧版单表 F(31,30,30,31) version 2)
-    键对错误率表.txt    900 键对 × 5 段类 P_err(a,b | 段类)
-       (2026-09-19 段类 = (有前键, 有后键, 段位): c0 2键第1段/c1 3·4键第1段/c2 3键第2段/
-        c3 4键第2段/c4 4键第3段 (旧称 角点/首段/短尾/中段/长尾)。
-        旧 4 列签名 (有无前键×有无后键) 在仅 2/4 键数据上与 (码长,段位) 一一对应, 加入
-        3 键后「尾段」被劈为 c2 (3键seg2) 与 c4 (4键seg3) → 旧模型拟合不足
-        D=10.17/df=2/p=0.006, 新模型 D=0.14 五类饱和; 09-21 复核 p=0.0020 仍显著)
+         无法表达 → 拆片。旧版单表 F(31,30,30,31) version 2)
+    错误率表.npz        **同构 6 段角色片** P_err(角色, 该角色的键) (version 1, 2026-10-10 起)
+        r_L2i1[a,b] / r_L3i1·r_L4i1[a,b,n] / r_L3i2·r_L4i3[p,a,b] / r_L4i2[p,a,b,n]
+        —— 索引键序与时间表相同 ⇒ 两表逐片直接相加, 无需广播。
+        取代旧 键对错误率表.txt（900 键对 × 5 段类, 2026-09-19~10-10）：那个视图把 p/n 身份
+        抹成"有前键/有后键"两列, 无法与时间侧 S(p,a,b,n) 对齐; 现按真实上下文逐码取用。
+        (模型形式与依据见 分析-错误率.py / README §4.6)
     错误修正时间-实测值.txt  标量 cost_ms (实测净成本; label 行式另含手别诊断行, 组装只读 cost_ms)
 
-写: 段当量表.npz  按**段角色** 6 片 (段当量 = 按键时间 + cost × P_err(该角色的段类))
-      —— 2026-09-21 起 6 片 (version 5; 09-19 的 5 片把 L3i1 与 L4i1 合成 seg_p0n1s1,
-         时间侧段位落地后两者按键时间不同, 必须分开; 错误侧两者的错误率仍同属 c1, 已验可合并)
+写: 段当量表.npz  按**段角色** 6 片 (段当量 = 按键时间 + cost × P_err(该角色, 该上下文))
     总当量-2-4键.txt  2/3/4 键总当量 = 段当量求和 (ms, 期望耗时原值不归一化)
 
-角色 → 段类与总当量映射:
-  段类 (错误侧)     : c0 2键第1段 / c1 3·4键第1段 / c2 3键第2段 / c3 4键第2段 / c4 4键第3段
-  角色 → 段类       : L2i1→c0  L3i1→c1  L3i2→c2  L4i1→c1  L4i2→c3  L4i3→c4
+角色 → 键序（与 分析-按键时间.py ROLE_CELL / 分析-错误率.py ROLE6 一致）:
   T₂(xy)   = seg_L2i1[x,y]
   T₃(xyz)  = seg_L3i1[x,y,z] + seg_L3i2[x,y,z]
   T₄(wxyz) = seg_L4i1[w,x,y] + seg_L4i2[w,x,y,z] + seg_L4i3[x,y,z]
@@ -51,8 +48,7 @@ except Exception:
     sys.exit("缺 产物/错误修正时间-实测值.txt — 先跑 分析-错误修正时间.py (错误修正时间实测值来源)")
 L = "abcdefghijklmnopqrstuvwxyz;,./"   # 30 键 (3 行 10 列完整 QWERTY)
 
-# 段角色片 → 错误侧段类 (索引与字母序与 分析-按键时间.py ROLE_CELL 一致)
-ROLE_CLS = {"L2i1": 0, "L3i1": 1, "L3i2": 2, "L4i1": 1, "L4i2": 3, "L4i3": 4}
+# 段角色片名（索引与字母序与 分析-按键时间.py ROLE_CELL / 分析-错误率.py ROLE6 一致）
 ROLE_NAMES = ["L2i1", "L3i1", "L3i2", "L4i1", "L4i2", "L4i3"]
 
 z = np.load(PROJ / "按键时间表.npz", allow_pickle=False)
@@ -64,48 +60,34 @@ assert R["L3i1"].shape == R["L3i2"].shape == R["L4i1"].shape == R["L4i3"].shape 
 assert R["L4i2"].shape == (30, 30, 30, 30)
 print(f"按键时间表: 6 角色片, {sum(v.size for v in R.values()):,} 条 (version {int(z['version'])})")
 
-# ── 键对错误率表: 900 键对 × 5 段类 ──
-COLS = ["err_p0n0s1", "err_p0n1s1", "err_p1n0s2", "err_p1n1s2", "err_p1n0s3"]
-CLS_LAB = ["c0 2键第1段(∅,∅,1)", "c1 3·4键第1段(∅,有,1)", "c2 3键第2段(有,∅,2)",
-           "c3 4键第2段(有,有,2)", "c4 4键第3段(有,∅,3)"]   # 旧称: 角点/首段/短尾/中段/长尾
-perr = {}
-with open(PROJ / "键对错误率表.txt", encoding="utf-8") as f:
-    head = f.readline().rstrip("\n").split("\t")
-    ci = [head.index(c) for c in COLS]
-    for line in f:
-        parts = line.rstrip("\n").split("\t")
-        perr[parts[0]] = [float(parts[i]) for i in ci]
-P5 = np.zeros((5, len(L), len(L)))               # [段类, a, b]
-for ab, v in perr.items():
-    i, j = L.index(ab[0]), L.index(ab[1])
-    for c in range(5):
-        P5[c, i, j] = v[c]
-assert len(perr) == len(L)**2, "错误率表应覆盖 900 键对"
-print(f"键对错误率: {len(perr)} 对 × 5 段类 (错误修正时间实测标量 {ERR_MS:.1f}ms, n={ERR_N})  类均值: "
-      + " / ".join(f"c{c} {P5[c].mean()*100:.2f}%" for c in range(5)))
+# ── 错误率表: 同构 6 段角色片 (2026-10-10 起; 取代 900×5 的 键对错误率表.txt) ──
+ZE = np.load(PROJ / "错误率表.npz", allow_pickle=False)
+assert tuple(ZE["letters"]) == tuple(L) and int(ZE["version"]) == 1, \
+    "错误率表版本不符 (期望 version 1 = 段角色 6 片 (p,a,b,n) 条件化); 先跑 分析-错误率.py"
+assert list(ZE["roles"]) == [f"r_{k}" for k in ROLE_NAMES]
+E = {k: ZE[f"r_{k}"].astype(np.float64) for k in ROLE_NAMES}
+for k in ROLE_NAMES:
+    assert E[k].shape == R[k].shape, f"错误率片 {k} 形状与时间片不一致: {E[k].shape} vs {R[k].shape}"
+print(f"错误率表: 6 角色片, {sum(v.size for v in E.values()):,} 条 (version {int(ZE['version'])}, "
+      f"(p,a,b,n) 条件化; 错误修正时间实测标量 {ERR_MS:.1f}ms, n={ERR_N})  片均值: "
+      + " / ".join(f"{k} {E[k].mean()*100:.2f}%" for k in ROLE_NAMES))
 
-# ── 段当量 = 按键时间(角色) + 错误修正时间 × P_err(该角色的段类) ──
-# 每个角色的 P_err 广播到该角色的索引维: 第1段 (a,b,·) / 末段 (·,a,b) / 中段 (·,a,b,·) / 2键第1段 (a,b)
-BR = {"L2i1": P5[0],                      # (a, b) 2键第1段
-      "L3i1": P5[1][:, :, None],          # (a, b, n) 3·4键第1段 → P 在 (a,b) 上广播
-      "L3i2": P5[2][None, :, :],          # (p, a, b) 3键第2段 → P 在 (a,b) 上广播
-      "L4i1": P5[1][:, :, None],
-      "L4i2": P5[3][None, :, :, None],
-      "L4i3": P5[4][None, :, :]}
-seg = {f"seg_{k}": R[k] + ERR_MS * BR[k] for k in ROLE_NAMES}
+# ── 段当量 = 按键时间(角色,上下文) + 错误修正时间 × P_err(同角色同上下文) ──
+# 两表同构 ⇒ 逐片直接相加（旧版需把 (a,b) 的 5 段类错误率广播到角色索引维, 现已不需要）
+seg = {f"seg_{k}": R[k] + ERR_MS * E[k] for k in ROLE_NAMES}
 np.savez_compressed(PROJ / "段当量表.npz", **seg,
                     letters=np.array(list(L)),
-                    version=np.int64(5), cost_ms=np.float64(ERR_MS),
+                    version=np.int64(6), cost_ms=np.float64(ERR_MS),
                     segments=np.array([f"seg_{k}" for k in ROLE_NAMES]),
                     roles=np.array(ROLE_NAMES),
-                    errcls=np.array([f"c{ROLE_CLS[k]}" for k in ROLE_NAMES]),
-                    note=np.array(f"段当量 = 按键时间 S(段角色,…) + {ERR_MS:.1f}×P_err(a,b|该角色段类) ms; "
-                                  "段角色 = (码长,段位): L2i1=2键第1段/L3i1·L4i1=3·4键第1段(同段类 c1)/"
-                                  "L3i2=3键第2段/L4i2=4键第2段/L4i3=4键第3段 (旧称 角点/首段/短尾/中段/长尾); "
+                    errsrc=np.array("错误率表.npz (p,a,b,n) 条件化 6 角色片"),
+                    note=np.array(f"段当量 = 按键时间 S(段角色,p,a,b,n) + {ERR_MS:.1f}×P_err(同角色同上下文) ms; "
+                                  "段角色 = (码长,段位): L2i1=2键第1段/L3i1=3键第1段/L3i2=3键第2段/"
+                                  "L4i1=4键第1段/L4i2=4键第2段/L4i3=4键第3段 (旧称 角点/首段/短尾/中段/长尾); "
                                   "T2=seg_L2i1 T3=seg_L3i1+seg_L3i2 "
-                                  "T4=seg_L4i1+seg_L4i2+seg_L4i3 (2026-09-21 段位特征落地, "
-                                  "version 5; 旧 5 片版把 L3i1 与 L4i1 合成一片 — 时间侧角色不同必须分)"))
-print(f"输出: 段当量表.npz  (6 个段角色片; 段当量 = 按键时间 + {ERR_MS:.1f}×段类错误率, version 5)")
+                                  "T4=seg_L4i1+seg_L4i2+seg_L4i3 (2026-10-10 错误侧改 (p,a,b,n) 条件化, "
+                                  "version 6; 与时间表同构; 旧 5 片版把 L3i1/L4i1 合成一片 — 两者时间与错误两侧都不同)"))
+print(f"输出: 段当量表.npz  (6 个段角色片; 段当量 = 按键时间 + {ERR_MS:.1f}×P_err(角色,上下文), version 6)")
 
 # ── 2-4 键总当量表 = 段当量求和 ──
 T2c = np.maximum(seg["seg_L2i1"], 0.0)
@@ -114,10 +96,11 @@ T4c = seg["seg_L4i1"][:, :, :, None] + seg["seg_L4i2"] + seg["seg_L4i3"][None, :
 
 total = len(L)**2 + len(L)**3 + len(L)**4
 with open(PROJ / "总当量-2-4键.txt", "w", encoding="utf-8") as f:
-    f.write(f"# 2/3/4 键总当量 (ms, 期望耗时原值含错误成本: 段当量 = 按键时间 + {ERR_MS:.1f}ms×P_err(a,b|段类), 实测错误修正时间标量)\n")
-    f.write("# 段角色 = (码长,段位); 段类 = (有前键,有后键,段位): c0 2键第1段/c1 3·4键第1段/c2 3键第2段/c3 4键第2段/c4 4键第3段 (旧称 角点/首段/短尾/中段/长尾)\n")
+    f.write(f"# 2/3/4 键总当量 (ms, 期望耗时原值含错误成本: 段当量 = 按键时间 + {ERR_MS:.1f}ms×P_err(段角色, p,a,b,n), 实测错误修正时间标量)\n")
+    f.write("# 段角色 = (码长,段位): L2i1 2键第1段/L3i1 3键第1段/L3i2 3键第2段/L4i1 4键第1段/L4i2 4键第2段/L4i3 4键第3段 (旧称 角点/首段/短尾/中段/长尾)\n")
+    f.write("# 错误率自 2026-10-10 起按 (p,a,b,n) 条件化 (错误率表.npz, 与按键时间表同构 6 角色片)\n")
     f.write("# T2=seg_L2i1(xy) T3=seg_L3i1(xyz)+seg_L3i2(xyz) "
-            "T4=seg_L4i1(wxy)+seg_L4i2(wxyz)+seg_L4i3(xyz)  (2026-09-21 段位特征落地)\n")
+            "T4=seg_L4i1(wxy)+seg_L4i2(wxyz)+seg_L4i3(xyz)  (时间侧 2026-09-21 段位落地; 错误侧 10-10 上下文化)\n")
     f.write("code\t当量\n")
     buf = []
     for (i, j), v in np.ndenumerate(T2c):
