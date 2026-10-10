@@ -8,11 +8,12 @@
 实验-后键条件系列, 结论已存档)。n=∅(索引 30) 表无后继 (词末"甩出")。
 **段角色 (v4, 2026-09-21 段位特征正式落地)**: S 的条件里加入 (码长 L, 段位 i) —
 段身份 (p,a,b,n) 只编码「是否首段 / 是否末段」, 同一签名在 3 键与 4 键码里角色不同
-(如 3键seg2 与 4键seg3 同签名 (有前键,无后键))。实现 = φ19 = φ15 + [i==2, i==3,
-L==3, L==4]; 3 键进训练池 (train4+train3+train2)。依据 实验/实验-段位特征.py 三刷:
+(如 3键seg2 与 4键seg3 同签名 (有前键,无后键))。实现 = 角色块 + 两个存在位
+(**2026-10-10 删冗余列后为 3 维** [i==3, L==3, L==4]; 见 phi_role 的恒等推导);
+3 键进训练池 (train4+train3+train2)。依据 实验/实验-段位特征.py 三刷:
 T₃ 总MAE −1.2~−1.6ms、T₄ −0.3~−0.5ms、T₂ 恒零 (同号显著, 两种测试划分)。
-**pa/pb 几何块 (v5, 2026-10-07 用户决策「落地新几何」)**: φ36 = φ19 + [存在(prev) + φ8(prev,a) + φ8(prev,b)]
-(17 维; 存在位只一个 —— pa/pb 的存在性同为「prev 是否为空」, 两列恒等, 见 phi_geo)。pa/pb 此前只有嵌入双线性 W₁/W₃、无几何; 消融
+**pa/pb 几何块 (v5, 2026-10-07 用户决策「落地新几何」)**: φ35 (2026-10-10 删除冗余列后) = 角色块 3 + 两个存在位 + φ8(a,b) 8 + φsuc7 + [φ8(prev,a) + φ8(prev,b)] 16 = 35
+(pa/pb 的存在位只一个 —— 同为「prev 是否为空」, 两列恒等, 仅在 phi_geo; 见 phi_geo)。pa/pb 此前只有嵌入双线性 W₁/W₃、无几何; 消融
 (实验/实验-四对几何特征消融.py 17 臂 + 实验-六对特征两批复核.py) 显示整对去掉 pa 代价
 T₄ +0.61/T₃ +0.88、bn +1.13/+1.08, 而 pa/pb 的 8 个几何特征逐一 LOO 使验证段 MAE 8/8
 全部变差 (冗余但无一可删) → 全 8 保留。**pn 不加** (T₄ +0.01/T₃ +1.26 纯负担);
@@ -23,7 +24,7 @@ T₄ +0.61/T₃ +0.88、bn +1.13/+1.08, 而 pa/pb 的 8 个几何特征逐一 LO
   dropout 使 5 成员去相关、集成收益放大, 实验-MLP调参.py 第四轮)
   φ15 = φ8(a,b) 几何 + φsuc7 后键特征 [存在, 同手(b,n), 同指(b,n), 同键(b,n),
   Fitts(b,n), 同手(a,n), Fitts(a,n)]; n=∅ 时 φsuc 全 0 (存在位=0)。
-部署形态 (v3, 2026-09-02, 用户确认采纳): BlendModel = 0.3×XGBoost(独热124+φ19)
+部署形态 (v3, 2026-09-02, 用户确认采纳): BlendModel = 0.3×XGBoost(独热122+φ35)
   + 0.7×(deep2 × 固定种子 0-4 平均) — 无 best-of 选优 → 无选优抽签噪声 (决策带
   从 ±3 缩至仅测试重洗 ~±1ms); 依据 实验-架构对比3.py (09-14 当前数据重跑):
   原始口径 总 41.6 / R²+0.592 / 段 25.8 / 角点 16.0 (对单模 base 44.0 −2.4, 对 ens5 −0.6)。
@@ -149,12 +150,25 @@ CORNER_ROLE = ROLE_ID[(2, 1)]      # 2 键角点槽位 (B4b 分桶 / §5.4 桶�
 FIRST_SEG_ROLES = (ROLE_ID[(2, 1)], ROLE_ID[(3, 1)], ROLE_ID[(4, 1)])   # p=∅ 段
 
 def phi_role(role):
-    """φ19 的段位块 4 维: [i==2, i==3, L==3, L==4] (role 数组 = 角色 id)。
-    6 个角色在该 4 维空间两两可分辨 (L2i1=[0,0,0,0] 为参考电平), 与实验变体逐位一致"""
+    """角色块 **3 维**: [i==3, L==3, L==4] (role 数组 = 角色 id)。
+
+    **2026-10-10 删冗余列**: 原为 4 维 [i==2, i==3, L==3, L==4]。因
+      **存在(p) ≡ (段位==2) + (段位==3)** (存在(p)=1 ⟺ 有前键 ⟺ 段位≥2; 恒等已在真实设计矩阵上
+      逐元素验证 max|Δ|=0) ⇒ 保留 存在(p)(在 phi_geo) 就等于已把两个段位 dummy 的和放进模型
+      ⇒ 段位那一对只能留一个, 且 **段位==2 ≡ 存在(p) − 段位==3** (对称式亦然, 同样 max|Δ|=0)。
+    删掉 i==2 后, 角色类 5 维 = 本块 3 + 存在(p)(phi_geo) + 存在(n)(phi_suc):
+      · 对 6 个角色**两两可分辨** (5 元组逐角色互异);
+      · 秩 = **6 = 满秩** ⇒ 6 个角色均值可自由拟合 (饱和), 而**不再含任何冗余列** ——
+        原 6 维是"饱和但含 1 冗余列"(7 列装 6 维), 现 5 维是**最小饱和参数化**(6 列装 6 维)。
+    注意**本块单独不再两两可分辨** (L3i1/L3i2 与 L4i1/L4i2 各撞码), 可分辨性来自与两个存在位的**组合**;
+    存在(n) 是**乘积型** (码长3·(1−段位2) + 码长4·(1−段位3), 含 2 键角点修正项)、不在任何线性子空间里,
+    正是它把秩补满 (去掉它则退化为加性块, 秩 5)。
+    依据: 实验/实验-角色存在位消融.py (五臂两批) —— 删任一冗余列对主指标均无显著影响 (配对 Δ段MAE ≤0.07ms),
+    该变更属"零代价的整洁化"; 详见 README §4.4 ⑥。"""
     role = np.asarray(role)
     i = np.array([ROLES[r][1] for r in role.ravel()]).reshape(role.shape)
     L = np.array([ROLES[r][0] for r in role.ravel()]).reshape(role.shape)
-    return np.stack([(i == 2), (i == 3), (L == 3), (L == 4)], axis=-1).astype(np.float32)
+    return np.stack([(i == 3), (L == 3), (L == 4)], axis=-1).astype(np.float32)
 
 def role_of(code_idx):
     """(码长, 段位) → 角色 id; 段位 1-based, 段数 = 码长-1"""
@@ -167,15 +181,18 @@ def role_of(code_idx):
 #   pn 一律不加 (T₄ +0.01 / T₃ +1.26 纯负担); an/bn 维持 φsuc 部分几何 (扩到全 8 无增益:
 #   PARTIAL an T₄ −0.19 / PARTIAL bn +0.02)。
 # 复核: 实验/实验-六对特征两批复核.py — T₄ −0.83/−0.40、T₃ −3.40/−3.47 (两独立种子批同号)。
-# KJ_GEO=0 → 退化旧配置 φ19 (供管线改动后的「旧配置精确复现」自检, 见项目记忆 09-21 教训)。
+# KJ_GEO=0 → 去掉 pa/pb 几何块 (退化到无该块的旧配置, 供「旧配置精确复现」自检)。
 GEO_ON = os.environ.get("KJ_GEO", "1") != "0"
-D_PHI = 19 + (17 if GEO_ON else 0)   # φ 宽度 = 15 (φ8 + φsuc7) + 4 (段位块) + [存在(prev) + φ8(prev,a) + φ8(prev,b)]
+D_PHI = 18 + (17 if GEO_ON else 0)   # φ35 (2026-10-10 删 段位==2 冗余列): 15 (φ8 + φsuc7)
+                                     # + 3 (角色块: 段位==3/码长==3/码长==4) + [存在(prev) + φ8(prev,a) + φ8(prev,b)]
 # KJ_TRIALWISE=0 → B4b 回退逐段口径 (2026-10-08 前的老行为); 默认 1 = 整 trial 口径 (见 trialwise_keep)。
 TRIALWISE = os.environ.get("KJ_TRIALWISE", "1") != "0"
 
 def _precompute_phi():
     """φ(a,b) 8 维 — 2026-08-11 文献特征扩展 (实验-特征扩展.py):
     [同手, 同指, 同键, 列距, 行距, Fitts, 镜像手指, 跨行同指]
+    **三类视图(README §4.4): 本函数是「跨键·ab」族的定义; 同一 8 项也用于 跨键·pa / 跨键·pb,
+    并以子集(4 项 / 2 项)用于 跨键·bn / 跨键·an。**
     文献依据: İşeri & Ekşioğlu 2015 (列>行>手 重要性排序, 显式几何有独立信息);
     Fitts (MT = a + b·log2(1+D/W), W=键宽, 行距≈2 键宽); keygen (同指跨行最慢);
     Grudin 1983 (镜像手指换位). 消融两轮:
@@ -214,7 +231,10 @@ _SUC_FITTS = np.log2(1 + np.sqrt((_COL[:,None]-_COL[None,:])**2 +
 
 def phi_suc(a, b, n):
     """φsuc 7 维: [存在, 同手(b,n), 同指(b,n), 同键(b,n), Fitts(b,n), 同手(a,n), Fitts(a,n)]
-    a,b,n: 键索引数组 (b/a 恒为真实键 0-29; n 可为 EMPTY=30 → 全 0)"""
+    a,b,n: 键索引数组 (b/a 恒为真实键 0-29; n 可为 EMPTY=30 → 全 0)
+    **三类视图(README §4.4): 存在(n) = 角色(位置信息: n=∅ ⟺ 末段); 第 2-5 项 = 跨键·bn(4);
+    第 6-7 项 = 跨键·an(2)。**
+    注意 bn/an 只取 φ8 的部分项 (其余项未加, 实测无增益 —— an 去掉全 8 反而 T₄ −0.19)。"""
     a = np.asarray(a); b = np.asarray(b); n = np.asarray(n)
     real = n != EMPTY
     nc = np.where(real, n, 0)
@@ -235,7 +255,9 @@ def phi_geo(prev, a, b):
     (2026-10-07 用户指出, 实测 18394 段全等) —— 重复列对神经分支严格共线、对 XGB 只是
     抽样扰动, 故合并为一列 (18→17)。该位其实也可由几何推出 (真实键对的 φ8 不可能全零:
     列距=0 ⟹ 同列 ⟹ 同指 ⟹ 同手=1), 但保留显式指示位更省样本, 与 φsuc 的 存在(n) 同约定。
-    a/b 恒为真实键 (调用点保证)。GEO_ON=False 时返回 0 列 (旧配置 φ19)。"""
+    a/b 恒为真实键 (调用点保证)。GEO_ON=False 时返回 0 列 (无 pa/pb 几何的旧配置)。
+    **三类视图(README §4.4): 存在(prev) = 角色(位置信息: prev 是否为真实键 ⟺ **有前键 ⟺ 段位≥2**,
+    p=∅ ⟺ 首段; 与角色块恒等 ⇒ 唯一严格冗余列); φ8(prev,a) = 跨键·pa(8); φ8(prev,b) = 跨键·pb(8)。**"""
     prev, a, b = np.asarray(prev), np.asarray(a), np.asarray(b)
     if not GEO_ON:
         return np.zeros((len(prev), 0), dtype=np.float32)
@@ -294,6 +316,11 @@ class KeystrokeModel(_SegModel):
     部署形态 = BlendModel (本类×5 固定种子平均 + XGB 0.3 混合, 见下方混合段)。
     v2 (2026-08-29): 增后键条件 — n 仅经 φsuc 特征进入 (几何身份≈嵌入身份);
     依据 实验-后键条件系列(已删, 结论存档): 对称化总MAE −1.3~−1.6。
+    **e_n 入 MLP 的复测 (2026-10-10)**: φ36 架构 + 2.7× 数据 + 无选优协议下三臂受控
+    (`实验/实验-n嵌入MLP.py`) ⇒ 仍无增益, T₄ 逐种子配对反而略差 (+0.19ms 级, 两批同号,
+    10 种子里 9 个变差)、T₂ 内建对照组同号变差 (2 键角点 n 恒 ∅ ⇒ 常量输入零信息);
+    e_n 是**重复通道** (n 的身份已由 φsuc7 六个摘要 + XGB 支路 nxt 独热 31 列承载)
+    ⇒ **维持 n 只经 φsuc 进入**, 见 README §4.4 ⑤。
     v1 依据 (实验-双线性扩容.py 等): de20 单层最优; relu 最优; RMSNorm 微增益;
     W3 跨键双线性 +2.1ms。"""
     def __init__(self, d_embed=20, d_hidden=128, p_drop=0.2, d_phi=D_PHI):
@@ -352,7 +379,7 @@ XGB_PARAMS = dict(n_estimators=500, learning_rate=0.06, max_depth=6,
 DM_OH_COLS = 122        # 独热列数 (prev 31 + a 30 + b 30 + nxt 31; 见 design_matrix) — 旧权重为 124
 
 def design_matrix(prev, a, b, nxt, ph):
-    """XGB 设计矩阵: 独热(prev 31 + a 30 + b 30 + nxt 31 = 122) + φ36 = 158 维。
+    """XGB 设计矩阵: 独热(prev 31 + a 30 + b 30 + nxt 31 = 122) + φ35 = 157 维。
 
     **各槽基数不同 (2026-10-08 修正)**: 只有 prev / nxt 能取 ∅(=30, 首段无前键 / 末段无后继键),
     **a、b 恒为真实键 (调用点保证) 故各只需 30 列** —— 原实现一律给 31 列, 多出的
@@ -697,7 +724,8 @@ def residual_filter_segments(data, prev, a, b, nxt, ph, tgt, k=3.0, m0_seeds=5):
 
 def model_dphi(model):
     """模型的 φ 期望宽度 (用于构造查询特征; BlendModel 取成员; 未知则 D_PHI)。
-    部署模型 φ36 (2026-10-07 pa/pb 几何落地); 该助手让查询侧在 φ19/φ15 旧权重下也能工作
+    部署模型 φ35 (2026-10-10 删角色冗余列后; 此前 φ36 = 09-21 φ19 + 10-07 pa/pb 几何块);
+    该助手让查询侧在 φ36/φ19/φ15 旧权重下也能工作
     (查询侧一律构造全宽 φ 再切片)。"""
     m = getattr(model, "members", [model])[0]
     return int(getattr(m, "d_phi", D_PHI))
@@ -707,7 +735,8 @@ def build_tensors(data):
     4 键 trial: 段 S(∅,a,b,c) / S(a,b,c,d) / S(b,c,d,∅) — 角色 (4,1)/(4,2)/(4,3);
     3 键 trial: 段 S(∅,a,b,c) / S(a,b,c,∅)           — 角色 (3,1)/(3,2);
     2 键 trial: 单段 S(∅,a,b,∅) = T₂ 角点            — 角色 (2,1)。
-    φ19 = φ15 + 段位块 [i==2, i==3, L==3, L==4] (2026-09-21 段位特征落地)"""
+    角色块 (2026-10-10 起 3 维) = [i==3, L==3, L==4]; 连同 phi_geo 的存在(p) 与 phi_suc 的
+    存在(n), 角色类 5 维对 6 角色两两可分辨且秩 6 (最小饱和参数化, 见 phi_role)"""
     segs = []
     for code, ts in data:
         n = len(code)
@@ -879,9 +908,17 @@ def bias_triplet(model, data, prev, a, b, nxt, ph, tgt, keep):
     y = np.array([ts[len(c) - 2] for c, ts in data])            # 实测总时间 = 末段累计时
     r_tot = (np.bincount(tri_k, weights=pred[keep], minlength=len(data)) - y)[ok]
     yk = y[ok]
+    ys = tgt[keep]                                              # 段级实测 (与段级误差同集)
     return dict(
         n=int(ok.sum()), n_seg=len(r_seg),
         mae=float(np.abs(r_tot).mean()), mae_seg=float(np.abs(r_seg).mean()),
+        # **2026-10-10 用户指令「以后结果同时报 MAE、mean、nMAE」**: 相对误差层
+        # (nMAE = MAE/mean(y), 同集同分母)。⚠ nMAE 有**反向偏差**: 误差含明显固定底
+        # (实测误差远非比例型, 见 README §5.1 末段) ⇒ 水平下降时 nMAE 会机械上升,
+        # **只能读作"误差占该人平均耗时的比例", 不可用来判"模型有没有变好"**。
+        mean=float(yk.mean()), mean_seg=float(ys.mean()),
+        nmae=float(np.abs(r_tot).mean() / yk.mean()),
+        nmae_seg=float(np.abs(r_seg).mean() / ys.mean()),
         r2=1 - float(np.sum(r_tot ** 2)) / max(float(np.sum((yk - yk.mean()) ** 2)), 1e-9),
         bias=float(r_tot.mean()), se=float(r_tot.std(ddof=1) / np.sqrt(len(r_tot))),
         med=float(np.median(r_tot)),
@@ -890,13 +927,14 @@ def bias_triplet(model, data, prev, a, b, nxt, ph, tgt, keep):
                for r in np.unique(rid_k)])
 
 def print_triplet(tag, label, d, note=""):
-    """三档统一报表 (字段顺序三档完全一致): n / 段MAE / 总MAE / R² / 偏差±SE / 段位分解"""
+    """三档统一报表 (字段顺序三档完全一致): n / mean / MAE / nMAE / R² / 偏差±SE / 段位分解"""
     z = d["bias"] / d["se"] if d["se"] > 0 else 0.0
     print(f"\n--- {tag} ({label}) {note}")
-    print(f"  总级: n={d['n']:5d} trial  总MAE={d['mae']:5.1f}ms  R²={d['r2']:+.3f}  "
+    print(f"  总级: n={d['n']:5d} trial  mean={d['mean']:6.1f}ms  总MAE={d['mae']:5.1f}ms  "
+          f"nMAE={d['nmae'] * 100:5.2f}%  R²={d['r2']:+.3f}  "
           f"偏差={d['bias']:+6.2f}±{d['se']:.2f}ms (z={z:+.2f}, 中位 {d['med']:+.1f})")
-    print(f"  段级: n={d['n_seg']:5d} 段    段MAE={d['mae_seg']:5.1f}ms  "
-          f"偏差={d['bias_seg']:+6.2f}±{d['se_seg']:.2f}ms")
+    print(f"  段级: n={d['n_seg']:5d} 段    mean={d['mean_seg']:6.1f}ms  段MAE={d['mae_seg']:5.1f}ms  "
+          f"nMAE={d['nmae_seg'] * 100:5.2f}%  偏差={d['bias_seg']:+6.2f}±{d['se_seg']:.2f}ms")
     print("  段位偏差: " + " | ".join(
         f"{ROLE_NAME[ROLES[r]]} {v:+.1f} (n={n})" for r, v, n in d["roles"]))
 
@@ -974,9 +1012,12 @@ def chen_comparison(m, pools, test_full):
     lead = {}                              # 档 → (条件模型 scale后MAE, 陈表 scale后MAE)
 
     def _tier(tag, y, q_cond, q_chen, cols4=True):
-        """一档对比: 两条曲线各按自身 k 缩放到实测尺度, 报 MAE/×k/scale后MAE/scale后R²/排名"""
-        print(f"\n=== 陈一凡表对比 [{tag[0]}] {tag[1]} (保留口径, n={len(y)} trial) ===")
-        print(f"  {'方法':12s} {'MAE':>7s}ms {'×k':>8s} {'scale后MAE':>10s} {'scale后R²':>9s} {'排名':>7s}")
+        """一档对比: 两条曲线各按自身 k 缩放到实测尺度; 报 mean / MAE / nMAE / ×k / scale后MAE / scale后nMAE / R² / 排名
+        (2026-10-10 用户指令「以后结果同时报 MAE、mean、nMAE」; nMAE = MAE/mean, 分母同一档同一集)"""
+        ym = float(np.mean(y))
+        print(f"\n=== 陈一凡表对比 [{tag[0]}] {tag[1]} (保留口径, n={len(y)} trial, mean={ym:.1f}ms) ===")
+        print(f"  {'方法':12s} {'MAE':>7s}ms {'nMAE':>7s} {'×k':>8s} {'scale后MAE':>10s} "
+              f"{'scale后nMAE':>11s} {'scale后R²':>9s} {'排名':>7s}")
         mae_k = {}
         for name, p in (("条件段模型", q_cond), ("陈一凡累加", q_chen)):
             k = float((y * p).sum() / (p ** 2).sum())
@@ -984,7 +1025,8 @@ def chen_comparison(m, pools, test_full):
             r2s = 1 - float(np.sum(errs ** 2)) / max(float(np.sum((y - y.mean()) ** 2)), 1e-9)
             sp, _ = spearmanr(p, y)
             mae_k[name] = errs.mean()
-            print(f"  {name:12s} {np.abs(p - y).mean():7.1f} {k:8.3f} {errs.mean():10.1f} {r2s:+9.3f} {sp:7.4f}")
+            print(f"  {name:12s} {np.abs(p - y).mean():7.1f} {np.abs(p - y).mean() / ym * 100:6.2f}% "
+                  f"{k:8.3f} {errs.mean():10.1f} {errs.mean() / ym * 100:10.2f}% {r2s:+9.3f} {sp:7.4f}")
         lead[tag[0]] = mae_k
         print(f"  → 条件段模型 scale 后领先陈表 "
               f"{100 * (1 - mae_k['条件段模型'] / mae_k['陈一凡累加']):.0f}%")
@@ -1010,13 +1052,15 @@ def chen_comparison(m, pools, test_full):
     samples = np.array(samples)
     y2, pc, pcy = samples[:, 0], samples[:, 1], samples[:, 2]
     k2 = float((y2 * pcy).sum() / (pcy ** 2).sum())
-    print(f"=== 陈一凡表对比 [2] 2 码角点 (留出 trial 清洗后, n={len(y2)}) ===")
+    y2m = float(np.mean(y2))
+    print(f"=== 陈一凡表对比 [2] 2 码角点 (留出 trial 清洗后, n={len(y2)}, mean={y2m:.1f}ms) ===")
     for name, p, k in (("条件段模型(角点)", pc, None), ("陈一凡表", pcy, k2)):
         pp = p if k is None else p * k
         err = np.abs(pp - y2)
         sp, _ = spearmanr(p, y2)
         tag = "本征 ms" if k is None else f"×k₂={k:.1f}"
-        print(f"  {name:14s}: MAE {err.mean():6.1f}ms (中位 {np.median(err):5.1f})  [{tag}]  排名 {sp:.4f}")
+        print(f"  {name:14s}: MAE {err.mean():6.1f}ms  nMAE {err.mean() / y2m * 100:5.2f}%  "
+              f"(中位 {np.median(err):5.1f})  [{tag}]  排名 {sp:.4f}")
     lead["2"] = {"条件段模型": np.abs(pc - y2).mean(), "陈一凡累加": np.abs(pcy * k2 - y2).mean()}
     print(f"  → 条件段模型 scale 后领先陈表 "
           f"{100 * (1 - lead['2']['条件段模型'] / lead['2']['陈一凡累加']):.0f}%")
@@ -1236,7 +1280,7 @@ def main():
     print("\n=== 导出 ===")
     ART_DIR.mkdir(exist_ok=True)
     deploy_m.save(str(MODEL_PT), str(MODEL_XGB))
-    print(f"  模型 → 产物/按键时间模型-神经.pt (deep2×5 权重) + 产物/按键时间模型-xgb.json (XGB 分量; φ19 段位落地后与旧权重不兼容)")
+    print(f"  模型 → 产物/按键时间模型-神经.pt (deep2×5 权重) + 产物/按键时间模型-xgb.json (XGB 分量; φ 宽度/角色块变更后与旧权重不兼容)")
     T = build_seg_table(deploy_m)
     export_seg_table(deploy_m, str(SEG_NPZ), T)
     readme_evidence(deploy_all, *ev_arrays, T)
